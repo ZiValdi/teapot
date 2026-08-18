@@ -40,6 +40,7 @@ DEFAULT_ECONOMICS = EconomicAssumptions(
 
 st.set_page_config(
     page_title="Agile Lab TEA",
+    page_icon="assets/icon.webp",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -170,7 +171,8 @@ def get_data(uploaded_file) -> pd.DataFrame:
 
 
 def filter_data(df: pd.DataFrame) -> pd.DataFrame:
-    st.sidebar.markdown("### Project Alpha")
+    st.sidebar.image("assets/icon.webp", width=80)
+    st.sidebar.markdown("### Project teapot")
     st.sidebar.caption("Pyrolysis process-data MVP")
     uploaded_file = st.sidebar.file_uploader("CSV dataset", type=["csv"])
 
@@ -520,7 +522,7 @@ def main() -> None:
         if economics["opex_breakdown"]:
             st.plotly_chart(
                 breakdown_chart("Annual OPEX", economics["opex_breakdown"]),
-                width="stretch",
+                use_container_width=True,
             )
         else:
             st.info("Economic assumptions are unavailable in the current filter.")
@@ -532,7 +534,7 @@ def main() -> None:
         st.markdown('<div class="section-title">Process-Data Group Comparison</div>', unsafe_allow_html=True)
         st.dataframe(
             create_temperature_groups(filtered_df),
-            width="stretch",
+            use_container_width=True,
             hide_index=True,
         )
 
@@ -541,7 +543,7 @@ def main() -> None:
         if economics["capex_breakdown"]:
             st.plotly_chart(
                 breakdown_chart("CAPEX", economics["capex_breakdown"]),
-                width="stretch",
+                use_container_width=True,
             )
         else:
             st.info("CAPEX is unavailable in the current filter.")
@@ -554,13 +556,13 @@ def main() -> None:
         if not cash_flow_table.empty:
             for column in ["Net Cash Flow", "Discounted Cash Flow", "Cumulative Cash Flow"]:
                 cash_flow_table[column] = cash_flow_table[column].map(lambda value: f"€{value / 1_000_000:.2f}M")
-        st.dataframe(cash_flow_table, width="stretch", hide_index=True)
+        st.dataframe(cash_flow_table, use_container_width=True, hide_index=True)
 
     with composition_col:
         st.markdown('<div class="section-title">Average Feedstock Composition</div>', unsafe_allow_html=True)
         composition = calculate_feedstock_composition(filtered_df)
         if composition:
-            st.plotly_chart(composition_chart(composition), width="stretch")
+            st.plotly_chart(composition_chart(composition), use_container_width=True)
         else:
             st.info("Composition fields are unavailable in the current filter.")
 
@@ -575,10 +577,10 @@ def main() -> None:
         )
         uncertainty_col, sensitivity_col = st.columns([1.1, 1])
         with uncertainty_col:
-            st.dataframe(uncertainty_summary, width="stretch", hide_index=True)
+            st.dataframe(uncertainty_summary, use_container_width=True, hide_index=True)
         with sensitivity_col:
             if not sensitivity.empty:
-                st.plotly_chart(sensitivity_chart(sensitivity), width="stretch")
+                st.plotly_chart(sensitivity_chart(sensitivity), use_container_width=True)
             else:
                 st.info("Sensitivity results are unavailable in the current filter.")
 

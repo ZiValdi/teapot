@@ -5,7 +5,8 @@ Small Streamlit dashboard for pyrolysis / thermochemical process-data exploratio
 ## Run
 
 ```bash
-pip install -r requirements.txt
+source .teapot/bin/activate
+pip install -r requirements.txt # Only at first start up
 streamlit run app.py
 ```
 
