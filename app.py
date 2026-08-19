@@ -200,6 +200,20 @@ def inject_css() -> None:
             border-radius: 8px;
             margin-bottom: 10px;
         }
+        
+        /* Sticky right panel for assumptions */
+        .sticky-right {
+            position: sticky;
+            top: 80px;
+            align-self: start;
+            background: var(--panel);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            max-height: calc(100vh - 120px);
+            overflow-y: auto;
+        }
+        
         </style>
         """,
         unsafe_allow_html=True,
@@ -1218,8 +1232,10 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         # Show info message if no results yet
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
+import copy
+
 def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
-    """Equipment Costing page – Equipment Master List with inline edit island."""
+    """Equipment Costing page – Equipment Master List with right panel for assumptions."""
     st.title("Equipment Costing")
     st.markdown(
         '<div class="status-line">● Manage equipment list – add, edit, or delete items</div>',
@@ -1276,7 +1292,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
                 })
         return rows
 
-    # Initialize session state
+    # Initialize session state for equipment rows
     if "equipment_rows" not in st.session_state:
         st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
     # Ensure all rows have all keys
@@ -1285,11 +1301,55 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
             if key not in row:
                 row[key] = 0 if "Cost" in key else "" if key != "Qty" else 1
 
-    # Track which row is being edited (store index or Tag)
+    # --- History for Undo/Redo ---
+    if "history" not in st.session_state:
+        st.session_state.history = [copy.deepcopy(st.session_state.equipment_rows)]
+        st.session_state.history_index = 0
+        st.session_state.history_max = 50
+
+    def push_history():
+        """Save current state to history (after modifications)."""
+        # Discard any future snapshots if we are not at the end
+        if st.session_state.history_index < len(st.session_state.history) - 1:
+            st.session_state.history = st.session_state.history[:st.session_state.history_index + 1]
+        # Append current state
+        st.session_state.history.append(copy.deepcopy(st.session_state.equipment_rows))
+        # Keep history bounded
+        if len(st.session_state.history) > st.session_state.history_max:
+            st.session_state.history = st.session_state.history[-st.session_state.history_max:]
+            st.session_state.history_index = len(st.session_state.history) - 1
+        else:
+            st.session_state.history_index += 1
+
+    def undo():
+        if st.session_state.history_index > 0:
+            st.session_state.history_index -= 1
+            st.session_state.equipment_rows = copy.deepcopy(st.session_state.history[st.session_state.history_index])
+            st.rerun()
+
+    def redo():
+        if st.session_state.history_index < len(st.session_state.history) - 1:
+            st.session_state.history_index += 1
+            st.session_state.equipment_rows = copy.deepcopy(st.session_state.history[st.session_state.history_index])
+            st.rerun()
+
+    # Global assumptions session state
+    if "global_assumptions" not in st.session_state:
+        st.session_state.global_assumptions = {
+            "location_factor": 1.15,
+            "escalation_rate": 3.5,
+            "labor_rate": 85,
+            "tariffs": True,
+            "cepei": False,
+        }
+
+    # Track which row is being edited
     if "edit_row_tag" not in st.session_state:
         st.session_state.edit_row_tag = None
+    if "delete_row_tag" not in st.session_state:
+        st.session_state.delete_row_tag = None
 
-    # Function to generate a unique tag
+    # Helper functions
     def generate_tag():
         existing_tags = [r["Tag"] for r in st.session_state.equipment_rows]
         base = "CUSTOM"
@@ -1298,217 +1358,289 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
             counter += 1
         return f"{base}-{counter:03d}"
 
-    # Helper to recalc adjusted costs
     def recalc_adjusted():
         for row in st.session_state.equipment_rows:
             row["Adjusted Cost"] = row["Base Cost"] * row["Multiplier"] * row["InstFactor"]
 
+    def apply_global_assumptions():
+        gf = st.session_state.global_assumptions
+        factor = gf["location_factor"] * (1 + gf["escalation_rate"] / 100)
+        if gf["tariffs"]:
+            factor *= 1.05
+        if gf["cepei"]:
+            factor *= 1.03
+        for row in st.session_state.equipment_rows:
+            row["Base Cost"] *= factor
+        recalc_adjusted()
+        push_history()  # save after applying assumptions
+
     recalc_adjusted()
     df_equip = pd.DataFrame(st.session_state.equipment_rows)
 
-    # Summary cards
-    total_tic = df_equip["Adjusted Cost"].sum()
-    pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
-    indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
-    contingency = indirect * 0.4
+    # --- Layout: main content (left) and right panel (sticky) ---
+    col_main, col_right = st.columns([3, 1])
 
-    st.markdown("### Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Installed Cost (TIC)", f"€{total_tic/1e6:.1f}M")
-    with col2:
-        st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1e6:.1f}M")
-    with col3:
-        st.metric("Indirect Costs", f"€{indirect/1e6:.1f}M")
-    with col4:
-        st.metric("Contingency", f"€{contingency/1e6:.1f}M")
+    with col_main:
+        # --- Summary Cards ---
+        total_tic = df_equip["Adjusted Cost"].sum()
+        pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+        indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+        contingency = indirect * 0.4
 
-    st.markdown("---")
+        st.markdown("### Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Installed Cost (TIC)", f"€{total_tic/1e6:.1f}M")
+        with col2:
+            st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1e6:.1f}M")
+        with col3:
+            st.metric("Indirect Costs", f"€{indirect/1e6:.1f}M")
+        with col4:
+            st.metric("Contingency", f"€{contingency/1e6:.1f}M")
 
-    # --- Add Equipment Button ---
-    if st.button("➕ Add Equipment", use_container_width=False):
-        new_row = {
-            "Category": "Other",
-            "Tag": generate_tag(),
-            "Description": "New Equipment",
-            "Qty": 1,
-            "MOC": "CS",
-            "Base Cost": 500000.0,
-            "Multiplier": 1.0,
-            "InstFactor": 2.0,
-        }
-        st.session_state.equipment_rows.append(new_row)
-        recalc_adjusted()
-        st.rerun()
+        st.markdown("---")
 
-    st.markdown("### Equipment Master List")
-    st.caption("✏️ Edit item (opens island) | 🗑️ Delete item")
+        # --- Add Equipment Button ---
+        if st.button("➕ Add Equipment", use_container_width=False):
+            new_row = {
+                "Category": "Other",
+                "Tag": generate_tag(),
+                "Description": "New Equipment",
+                "Qty": 1,
+                "MOC": "CS",
+                "Base Cost": 500000.0,
+                "Multiplier": 1.0,
+                "InstFactor": 2.0,
+            }
+            st.session_state.equipment_rows.append(new_row)
+            recalc_adjusted()
+            push_history()
+            st.rerun()
 
-    # --- Table with Edit and Delete buttons ---
-    # Header
-    header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
-    headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Actions"]
-    for col, header in zip(header_cols, headers):
-        col.markdown(f"**{header}**")
+        st.markdown("### Equipment Master List")
+        st.caption("✏️ Edit item (opens island) | 🗑️ Delete item")
 
-    # Rows – we'll display each row and then an optional edit island below it
-    for idx, row in df_equip.iterrows():
-        # Row data
-        cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
-        with cols[0]:
-            st.write(row["Category"])
-        with cols[1]:
-            st.write(row["Tag"])
-        with cols[2]:
-            st.write(row["Description"])
-        with cols[3]:
-            st.write(row["Qty"])
-        with cols[4]:
-            st.write(row["MOC"])
-        with cols[5]:
-            st.write(f"€{row['Base Cost']/1e6:.2f}M")
-        with cols[6]:
-            st.write(f"{row['Multiplier']:.2f}x")
-        with cols[7]:
-            st.write(f"{row['InstFactor']:.1f}")
-        with cols[8]:
-            st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
-        with cols[9]:
-            edit_col, del_col = st.columns(2)
-            with edit_col:
-                if st.button("✏️", key=f"edit_{row['Tag']}", help="Edit item"):
-                    st.session_state.edit_row_tag = row["Tag"]
-                    st.rerun()
-            with del_col:
-                if st.button("🗑️", key=f"del_{row['Tag']}", help="Delete item"):
-                    # Delete directly with confirmation via a separate island? We'll use a popover for delete too.
-                    # For simplicity, we'll use the same island approach for delete confirmation.
-                    st.session_state.delete_row_tag = row["Tag"]
-                    st.rerun()
+        # --- Table with Edit and Delete buttons ---
+        # Header
+        header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+        headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Actions"]
+        for col, header in zip(header_cols, headers):
+            col.markdown(f"**{header}**")
 
-        # --- Edit Island (appears directly below the row) ---
-        if st.session_state.edit_row_tag == row["Tag"]:
-            with st.container():
-                st.markdown("---")  # separator line to visually group the island
-                # Edit form in a card-like container using columns
-                st.markdown(f"**✏️ Editing {row['Tag']}**")
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    # Editable fields
-                    new_category = st.text_input("Category", value=row["Category"], key=f"cat_{row['Tag']}")
-                    new_tag = st.text_input("Tag", value=row["Tag"], key=f"tag_{row['Tag']}")
-                    new_desc = st.text_input("Description", value=row["Description"], key=f"desc_{row['Tag']}")
-                    col_qty, col_moc = st.columns(2)
-                    with col_qty:
-                        new_qty = st.number_input("Qty", min_value=1, value=int(row["Qty"]), step=1, key=f"qty_{row['Tag']}")
-                    with col_moc:
-                        new_moc = st.text_input("MOC", value=row["MOC"], key=f"moc_{row['Tag']}")
-                    new_base = st.number_input(
-                        "Base Cost (€)",
-                        min_value=0.0,
-                        value=float(row["Base Cost"]),
-                        step=100000.0,
-                        format="%.0f",
-                        key=f"base_{row['Tag']}",
-                    )
-                    col_mult, col_inst = st.columns(2)
-                    with col_mult:
-                        new_mult = st.number_input(
-                            "Multiplier (0.5–2.0)",
-                            min_value=0.5,
-                            max_value=2.0,
-                            value=row["Multiplier"],
-                            step=0.05,
-                            key=f"mult_{row['Tag']}",
+        # Rows
+        for idx, row in df_equip.iterrows():
+            # Row data
+            cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+            with cols[0]:
+                st.write(row["Category"])
+            with cols[1]:
+                st.write(row["Tag"])
+            with cols[2]:
+                st.write(row["Description"])
+            with cols[3]:
+                st.write(row["Qty"])
+            with cols[4]:
+                st.write(row["MOC"])
+            with cols[5]:
+                st.write(f"€{row['Base Cost']/1e6:.2f}M")
+            with cols[6]:
+                st.write(f"{row['Multiplier']:.2f}x")
+            with cols[7]:
+                st.write(f"{row['InstFactor']:.1f}")
+            with cols[8]:
+                st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
+            with cols[9]:
+                edit_col, del_col = st.columns(2)
+                with edit_col:
+                    if st.button("✏️", key=f"edit_{row['Tag']}", help="Edit item"):
+                        st.session_state.edit_row_tag = row["Tag"]
+                        st.rerun()
+                with del_col:
+                    if st.button("🗑️", key=f"del_{row['Tag']}", help="Delete item"):
+                        st.session_state.delete_row_tag = row["Tag"]
+                        st.rerun()
+
+            # --- Edit Island ---
+            if st.session_state.edit_row_tag == row["Tag"]:
+                with st.container():
+                    st.markdown("---")
+                    st.markdown(f"**✏️ Editing {row['Tag']}**")
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        new_category = st.text_input("Category", value=row["Category"], key=f"cat_{row['Tag']}")
+                        new_tag = st.text_input("Tag", value=row["Tag"], key=f"tag_{row['Tag']}")
+                        new_desc = st.text_input("Description", value=row["Description"], key=f"desc_{row['Tag']}")
+                        col_qty, col_moc = st.columns(2)
+                        with col_qty:
+                            new_qty = st.number_input("Qty", min_value=1, value=int(row["Qty"]), step=1, key=f"qty_{row['Tag']}")
+                        with col_moc:
+                            new_moc = st.text_input("MOC", value=row["MOC"], key=f"moc_{row['Tag']}")
+                        new_base = st.number_input(
+                            "Base Cost (€)",
+                            min_value=0.0,
+                            value=float(row["Base Cost"]),
+                            step=100000.0,
+                            format="%.0f",
+                            key=f"base_{row['Tag']}",
                         )
-                    with col_inst:
-                        new_inst = st.number_input(
-                            "Inst. Factor (0.5–4.0)",
-                            min_value=0.5,
-                            max_value=4.0,
-                            value=row["InstFactor"],
-                            step=0.1,
-                            key=f"inst_{row['Tag']}",
-                        )
-                with col2:
-                    st.markdown("**Actions**")
-                    if st.button("✅ Confirm", key=f"confirm_{row['Tag']}", use_container_width=True):
-                        # Update the row in session state
-                        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
-                        if row_idx is not None:
-                            st.session_state.equipment_rows[row_idx]["Category"] = new_category
-                            st.session_state.equipment_rows[row_idx]["Tag"] = new_tag
-                            st.session_state.equipment_rows[row_idx]["Description"] = new_desc
-                            st.session_state.equipment_rows[row_idx]["Qty"] = new_qty
-                            st.session_state.equipment_rows[row_idx]["MOC"] = new_moc
-                            st.session_state.equipment_rows[row_idx]["Base Cost"] = new_base
-                            st.session_state.equipment_rows[row_idx]["Multiplier"] = new_mult
-                            st.session_state.equipment_rows[row_idx]["InstFactor"] = new_inst
-                            recalc_adjusted()
-                        st.session_state.edit_row_tag = None
-                        st.rerun()
-                    if st.button("❌ Cancel", key=f"cancel_{row['Tag']}", use_container_width=True):
-                        st.session_state.edit_row_tag = None
-                        st.rerun()
-                st.markdown("---")  # end of island
+                        col_mult, col_inst = st.columns(2)
+                        with col_mult:
+                            new_mult = st.number_input(
+                                "Multiplier (0.5–2.0)",
+                                min_value=0.5,
+                                max_value=2.0,
+                                value=row["Multiplier"],
+                                step=0.05,
+                                key=f"mult_{row['Tag']}",
+                            )
+                        with col_inst:
+                            new_inst = st.number_input(
+                                "Inst. Factor (0.5–4.0)",
+                                min_value=0.5,
+                                max_value=4.0,
+                                value=row["InstFactor"],
+                                step=0.1,
+                                key=f"inst_{row['Tag']}",
+                            )
+                    with col2:
+                        st.markdown("**Actions**")
+                        if st.button("✅ Confirm", key=f"confirm_{row['Tag']}", use_container_width=True):
+                            row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
+                            if row_idx is not None:
+                                st.session_state.equipment_rows[row_idx]["Category"] = new_category
+                                st.session_state.equipment_rows[row_idx]["Tag"] = new_tag
+                                st.session_state.equipment_rows[row_idx]["Description"] = new_desc
+                                st.session_state.equipment_rows[row_idx]["Qty"] = new_qty
+                                st.session_state.equipment_rows[row_idx]["MOC"] = new_moc
+                                st.session_state.equipment_rows[row_idx]["Base Cost"] = new_base
+                                st.session_state.equipment_rows[row_idx]["Multiplier"] = new_mult
+                                st.session_state.equipment_rows[row_idx]["InstFactor"] = new_inst
+                                recalc_adjusted()
+                                push_history()
+                            st.session_state.edit_row_tag = None
+                            st.rerun()
+                        if st.button("❌ Cancel", key=f"cancel_{row['Tag']}", use_container_width=True):
+                            st.session_state.edit_row_tag = None
+                            st.rerun()
+                    st.markdown("---")
 
-        # --- Delete Island (appears directly below the row) ---
-        if hasattr(st.session_state, 'delete_row_tag') and st.session_state.delete_row_tag == row["Tag"]:
-            with st.container():
-                st.markdown("---")
-                st.warning(f"🗑️ Delete {row['Tag']}?")
-                st.caption(f"Description: {row['Description']}")
-                col_confirm, col_cancel = st.columns(2)
-                with col_confirm:
-                    if st.button("✅ Yes, delete", key=f"del_confirm_{row['Tag']}", use_container_width=True):
-                        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
-                        if row_idx is not None:
-                            st.session_state.equipment_rows.pop(row_idx)
-                            recalc_adjusted()
-                        if hasattr(st.session_state, 'delete_row_tag'):
-                            del st.session_state.delete_row_tag
-                        st.rerun()
-                with col_cancel:
-                    if st.button("❌ No, cancel", key=f"del_cancel_{row['Tag']}", use_container_width=True):
-                        if hasattr(st.session_state, 'delete_row_tag'):
-                            del st.session_state.delete_row_tag
-                        st.rerun()
-                st.markdown("---")
+            # --- Delete Island ---
+            if st.session_state.delete_row_tag == row["Tag"]:
+                with st.container():
+                    st.markdown("---")
+                    st.warning(f"🗑️ Delete {row['Tag']}?")
+                    st.caption(f"Description: {row['Description']}")
+                    col_confirm, col_cancel = st.columns(2)
+                    with col_confirm:
+                        if st.button("✅ Yes, delete", key=f"del_confirm_{row['Tag']}", use_container_width=True):
+                            row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
+                            if row_idx is not None:
+                                st.session_state.equipment_rows.pop(row_idx)
+                                recalc_adjusted()
+                                push_history()
+                            st.session_state.delete_row_tag = None
+                            st.rerun()
+                    with col_cancel:
+                        if st.button("❌ No, cancel", key=f"del_cancel_{row['Tag']}", use_container_width=True):
+                            st.session_state.delete_row_tag = None
+                            st.rerun()
+                    st.markdown("---")
 
-    st.markdown("---")
+        # --- Recompute economics ---
+        total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
+        new_assumptions = replace(
+            assumptions,
+            base_capex_meur=total_new_capex / 1_000_000,
+        )
+        new_econ = calculate_economics(df, new_assumptions)
+        new_kpis = new_econ["kpis"]
 
-    # --- Recompute economics ---
-    total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
-    new_assumptions = replace(
-        assumptions,
-        base_capex_meur=total_new_capex / 1_000_000,
-    )
-    new_econ = calculate_economics(df, new_assumptions)
-    new_kpis = new_econ["kpis"]
+        st.markdown("### Updated Economics")
+        econ_cols = st.columns(4)
+        with econ_cols[0]:
+            st.metric("Total CAPEX", new_kpis["capex"])
+        with econ_cols[1]:
+            st.metric("NPV", new_kpis["npv"])
+        with econ_cols[2]:
+            st.metric("IRR", new_kpis["irr"])
+        with econ_cols[3]:
+            st.metric("Payback", new_kpis["payback"])
 
-    st.markdown("### Updated Economics")
-    econ_cols = st.columns(4)
-    with econ_cols[0]:
-        st.metric("Total CAPEX", new_kpis["capex"])
-    with econ_cols[1]:
-        st.metric("NPV", new_kpis["npv"])
-    with econ_cols[2]:
-        st.metric("IRR", new_kpis["irr"])
-    with econ_cols[3]:
-        st.metric("Payback", new_kpis["payback"])
+        # --- Reset button (in main area) ---
+        if st.button("Reset All to Defaults", use_container_width=True):
+            st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
+            for row in st.session_state.equipment_rows:
+                row["Multiplier"] = 1.0
+                row["InstFactor"] = 2.0
+            st.session_state.edit_row_tag = None
+            st.session_state.delete_row_tag = None
+            st.session_state.global_assumptions = {
+                "location_factor": 1.15,
+                "escalation_rate": 3.5,
+                "labor_rate": 85,
+                "tariffs": True,
+                "cepei": False,
+            }
+            recalc_adjusted()
+            push_history()
+            st.rerun()
 
-    # Reset button
-    if st.button("Reset All to Defaults", use_container_width=True):
-        st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
-        for row in st.session_state.equipment_rows:
-            row["Multiplier"] = 1.0
-            row["InstFactor"] = 2.0
-        st.session_state.edit_row_tag = None
-        if hasattr(st.session_state, 'delete_row_tag'):
-            del st.session_state.delete_row_tag
-        recalc_adjusted()
-        st.rerun()
-        
+    # --- Right Panel (sticky) ---
+    with col_right:
+        st.markdown('<div class="sticky-right">', unsafe_allow_html=True)
+        st.markdown("### ⚙️ Global Assumptions")
+        st.caption("Apply to all equipment costs.")
+
+        # Undo / Redo buttons
+        col_undo, col_redo = st.columns(2)
+        with col_undo:
+            if st.button("↩️ Undo", use_container_width=True, disabled=(st.session_state.history_index == 0)):
+                undo()
+        with col_redo:
+            if st.button("↪️ Redo", use_container_width=True, disabled=(st.session_state.history_index >= len(st.session_state.history) - 1)):
+                redo()
+        st.markdown("---")
+
+        # Assumption controls
+        location_label = st.selectbox(
+            "Location Factor",
+            options=["US Gulf Coast (1.0)", "US Midwest (1.15)", "Western Europe (1.25)", "SE Asia (0.85)"],
+            index=1,
+            key="loc_factor_sel",
+        )
+        location_factor = float(location_label.split("(")[1].rstrip(")"))
+        escalation_rate = st.slider(
+            "Escalation Rate (%/yr)",
+            min_value=0.0,
+            max_value=10.0,
+            value=st.session_state.global_assumptions["escalation_rate"],
+            step=0.5,
+            key="esc_rate",
+        )
+        labor_rate = st.number_input(
+            "Base Labor Rate (€/hr)",
+            min_value=0,
+            max_value=200,
+            value=st.session_state.global_assumptions["labor_rate"],
+            step=5,
+            key="labor_rate_input",
+        )
+        tariffs = st.toggle("Include Tariffs", value=st.session_state.global_assumptions["tariffs"], key="tariff_toggle")
+        cepei = st.toggle("Strict CEPCI Update", value=st.session_state.global_assumptions["cepei"], key="cepei_toggle")
+
+        # Apply button
+        if st.button("Apply Assumptions", use_container_width=True):
+            st.session_state.global_assumptions["location_factor"] = location_factor
+            st.session_state.global_assumptions["escalation_rate"] = escalation_rate
+            st.session_state.global_assumptions["labor_rate"] = labor_rate
+            st.session_state.global_assumptions["tariffs"] = tariffs
+            st.session_state.global_assumptions["cepei"] = cepei
+            apply_global_assumptions()
+            st.rerun()
+
+        st.caption("Click 'Apply' to scale all equipment Base Costs.")
+        st.markdown('</div>', unsafe_allow_html=True)
+
 def main() -> None:
     inject_css()
     base_df = get_data(None)
