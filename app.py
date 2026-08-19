@@ -1219,10 +1219,10 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
 def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
-    """Equipment Costing page – adjust CAPEX category multipliers and see impact on economics."""
+    """Equipment Costing page – Equipment Master List with inline editing via popover."""
     st.title("Equipment Costing")
     st.markdown(
-        '<div class="status-line">● Adjust cost multipliers for each equipment category</div>',
+        '<div class="status-line">● Edit each equipment item’s Multiplier and Installation Factor</div>',
         unsafe_allow_html=True,
     )
 
@@ -1233,136 +1233,211 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         st.warning("No CAPEX breakdown available. Please check your data and assumptions.")
         return
 
-    # Compute default total CAPEX
-    default_total = sum(base_capex_breakdown.values())
-    categories = list(base_capex_breakdown.keys())
-    default_costs = list(base_capex_breakdown.values())
+    # Define equipment items per category (static for demo)
+    category_items = {
+        "Reactor Island": [
+            {"tag": "R-101", "description": "Primary Pyrolysis Reactor", "qty": 2, "moc": "SS 316L", "base_pct": 0.6},
+            {"tag": "R-102", "description": "Secondary Upgrading Reactor", "qty": 1, "moc": "Inconel 625", "base_pct": 0.4},
+        ],
+        "Feed Handling": [
+            {"tag": "FH-101", "description": "Feed Conveyor System", "qty": 1, "moc": "CS", "base_pct": 0.5},
+            {"tag": "FH-102", "description": "Feed Dryer", "qty": 1, "moc": "SS 304", "base_pct": 0.5},
+        ],
+        "Condensation": [
+            {"tag": "E-201", "description": "Product Condenser", "qty": 2, "moc": "SS 316L", "base_pct": 0.6},
+            {"tag": "E-202", "description": "Quench Tower", "qty": 1, "moc": "CS/SS", "base_pct": 0.4},
+        ],
+        "Utilities": [
+            {"tag": "UT-101", "description": "Cooling Water System", "qty": 1, "moc": "CS", "base_pct": 0.5},
+            {"tag": "UT-102", "description": "Nitrogen Generation", "qty": 1, "moc": "SS 304", "base_pct": 0.5},
+        ],
+        "Installation & Contingency": [
+            {"tag": "INST-01", "description": "Installation Labor", "qty": 1, "moc": "N/A", "base_pct": 0.6},
+            {"tag": "INST-02", "description": "Contingency", "qty": 1, "moc": "N/A", "base_pct": 0.4},
+        ],
+    }
 
-    st.markdown("### Adjust Cost Multipliers")
-    st.caption("Each multiplier scales the default cost for that equipment category. Changes update economics in real time.")
+    # Build equipment list with default multiplier and installation factor
+    def build_equipment_list(capex_breakdown):
+        rows = []
+        for cat, items in category_items.items():
+            cat_total = capex_breakdown.get(cat, 0)
+            for item in items:
+                base_cost = cat_total * item["base_pct"]
+                rows.append({
+                    "Category": cat,
+                    "Tag": item["tag"],
+                    "Description": item["description"],
+                    "Qty": item["qty"],
+                    "MOC": item["moc"],
+                    "Base Cost": base_cost,
+                    "Multiplier": 1.0,
+                    "InstFactor": 2.0,  # default installation factor
+                })
+        return rows
 
-    # Use session state to store multipliers
-    if "cost_multipliers" not in st.session_state:
-        st.session_state.cost_multipliers = {cat: 1.0 for cat in categories}
+    # Initialize session state
+    if "equipment_rows" not in st.session_state:
+        st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
+    # Ensure all keys exist
+    for row in st.session_state.equipment_rows:
+        if "Multiplier" not in row:
+            row["Multiplier"] = 1.0
+        if "InstFactor" not in row:
+            row["InstFactor"] = 2.0
 
-    # Display sliders for each category (two columns)
-    col1, col2 = st.columns([1, 1])
-    multipliers = {}
+    # Compute adjusted costs and totals
+    for row in st.session_state.equipment_rows:
+        row["Adjusted Cost"] = row["Base Cost"] * row["Multiplier"] * row["InstFactor"]
+
+    df_equip = pd.DataFrame(st.session_state.equipment_rows)
+
+    # Summary cards
+    total_tic = df_equip["Adjusted Cost"].sum()
+    # PEC = sum of categories excluding Installation & Contingency
+    pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+    indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+    contingency = indirect * 0.4
+
+    st.markdown("### Summary")
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        for cat in categories[:len(categories)//2]:
-            multipliers[cat] = st.slider(
-                f"{cat}",
-                min_value=0.5,
-                max_value=2.0,
-                value=st.session_state.cost_multipliers.get(cat, 1.0),
-                step=0.05,
-                key=f"cost_{cat}",
-            )
+        st.metric("Total Installed Cost (TIC)", f"€{total_tic/1e6:.1f}M")
     with col2:
-        for cat in categories[len(categories)//2:]:
-            multipliers[cat] = st.slider(
-                f"{cat}",
-                min_value=0.5,
-                max_value=2.0,
-                value=st.session_state.cost_multipliers.get(cat, 1.0),
-                step=0.05,
-                key=f"cost_{cat}",
-            )
-
-    # Update session state
-    for cat, val in multipliers.items():
-        st.session_state.cost_multipliers[cat] = val
-
-    # Compute new costs
-    new_costs = {cat: default_costs[i] * multipliers[cat] for i, cat in enumerate(categories)}
-    new_total = sum(new_costs.values())
-
-    # Update assumptions with new CAPEX (override base_capex_meur)
-    new_assumptions = replace(
-        assumptions,
-        base_capex_meur=new_total / 1_000_000,
-    )
-
-    # Recalculate economics with new assumptions
-    new_econ = calculate_economics(df, new_assumptions)
-    new_kpis = new_econ["kpis"]
-
-    # --- NEW: Summary Cards ---
-    st.markdown("### Cost Summary")
-    # Compute derived metrics
-    # Assume: PEC (Purchased Equipment Cost) = Sum of base costs (without installation factor)
-    # We'll approximate: PEC = sum of default_costs (i.e., equipment bare costs) * multipliers
-    pec = sum(default_costs[i] * multipliers[cat] for i, cat in enumerate(categories))
-    # Indirect costs = installation + contingency (estimated as 30% of PEC for demonstration)
-    # For a more accurate split, we'd need to know which categories include installation.
-    # For now, we'll compute indirect as total - pec (if total > pec)
-    indirect = new_total - pec if new_total > pec else 0
-    # Contingency = 15% of total (typical)
-    contingency = new_total * 0.15
-
-    # Display KPI cards
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Total Installed Cost (TIC)", f"€{new_total/1_000_000:.1f}M", 
-                  delta=f"{(new_total/default_total - 1)*100:.1f}%")
-    with k2:
-        st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1_000_000:.1f}M", 
-                  delta=f"{pec/new_total*100:.1f}% of TIC")
-    with k3:
-        st.metric("Indirect Costs", f"€{indirect/1_000_000:.1f}M", delta="Engineering, Construction, Mgmt")
-    with k4:
-        st.metric("Contingency", f"€{contingency/1_000_000:.1f}M", delta="15% of TIC")
+        st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1e6:.1f}M")
+    with col3:
+        st.metric("Indirect Costs", f"€{indirect/1e6:.1f}M")
+    with col4:
+        st.metric("Contingency", f"€{contingency/1e6:.1f}M")
 
     st.markdown("---")
 
-    # --- Existing Results Section (KPIs, Table, Chart, Cash Flow) ---
-    st.markdown("### Economic Impact")
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
+    # Equipment Master List with Edit buttons
+    st.markdown("### Equipment Master List")
+    st.caption("Click the ✏️ button to edit Multiplier and Installation Factor for each item.")
+
+    # Display the table with an Actions column
+    # We'll iterate over rows and build the table manually using columns
+    # Streamlit doesn't have a built-in editable table with per-row buttons, so we'll build it with columns.
+
+    # We'll display the table as a series of st.columns for each row.
+    # For performance, we can use st.dataframe with a custom column for buttons, but that's not interactive.
+    # So we'll build a custom table.
+
+    # Header
+    header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.6])
+    headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Action"]
+    for col, header in zip(header_cols, headers):
+        col.markdown(f"**{header}**")
+
+    # Rows
+    for idx, row in df_equip.iterrows():
+        cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.6])
+        with cols[0]:
+            st.write(row["Category"][:15])
+        with cols[1]:
+            st.write(row["Tag"])
+        with cols[2]:
+            st.write(row["Description"])
+        with cols[3]:
+            st.write(row["Qty"])
+        with cols[4]:
+            st.write(row["MOC"])
+        with cols[5]:
+            st.write(f"€{row['Base Cost']/1e6:.2f}M")
+        with cols[6]:
+            st.write(f"{row['Multiplier']:.2f}x")
+        with cols[7]:
+            st.write(f"{row['InstFactor']:.1f}")
+        with cols[8]:
+            st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
+        with cols[9]:
+            # Edit button
+            if st.button("✏️", key=f"edit_{row['Tag']}"):
+                st.session_state.editing_tag = row["Tag"]
+                st.rerun()
+
+    # Popover for editing (appears when a tag is selected)
+    if "editing_tag" in st.session_state and st.session_state.editing_tag is not None:
+        tag_to_edit = st.session_state.editing_tag
+        # Find the row
+        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == tag_to_edit), None)
+        if row_idx is not None:
+            row = st.session_state.equipment_rows[row_idx]
+            with st.popover(f"Edit {tag_to_edit}", use_container_width=True):
+                st.markdown(f"**{row['Description']}**")
+                st.caption(f"Category: {row['Category']} | Qty: {row['Qty']} | MOC: {row['MOC']}")
+                st.caption(f"Base Cost: €{row['Base Cost']/1e6:.2f}M")
+
+                new_mult = st.number_input(
+                    "Multiplier (0.5 – 2.0)",
+                    min_value=0.5,
+                    max_value=2.0,
+                    value=row["Multiplier"],
+                    step=0.05,
+                    key=f"mult_{tag_to_edit}",
+                )
+                new_inst = st.number_input(
+                    "Installation Factor (0.5 – 4.0)",
+                    min_value=0.5,
+                    max_value=4.0,
+                    value=row["InstFactor"],
+                    step=0.1,
+                    key=f"inst_{tag_to_edit}",
+                )
+
+                col_confirm, col_cancel = st.columns(2)
+                with col_confirm:
+                    if st.button("✅ Confirm", use_container_width=True):
+                        # Update row
+                        row["Multiplier"] = new_mult
+                        row["InstFactor"] = new_inst
+                        st.session_state.equipment_rows[row_idx] = row
+                        # Clear editing state
+                        del st.session_state.editing_tag
+                        st.rerun()
+                with col_cancel:
+                    if st.button("❌ Cancel", use_container_width=True):
+                        del st.session_state.editing_tag
+                        st.rerun()
+        else:
+            del st.session_state.editing_tag
+            st.rerun()
+
+    st.markdown("---")
+
+    # Recompute economics with new total CAPEX
+    # Recalculate adjusted costs after potential edits
+    total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
+    new_assumptions = replace(
+        assumptions,
+        base_capex_meur=total_new_capex / 1_000_000,
+    )
+    new_econ = calculate_economics(df, new_assumptions)
+    new_kpis = new_econ["kpis"]
+
+    st.markdown("### Updated Economics")
+    econ_cols = st.columns(4)
+    with econ_cols[0]:
+        st.metric("Total CAPEX", new_kpis["capex"])
+    with econ_cols[1]:
         st.metric("NPV", new_kpis["npv"])
-    with k2:
+    with econ_cols[2]:
         st.metric("IRR", new_kpis["irr"])
-    with k3:
+    with econ_cols[3]:
         st.metric("Payback", new_kpis["payback"])
-    with k4:
-        st.metric("Annual OPEX", new_kpis["annual_opex"])
-
-    # Two columns: table and chart
-    col_table, col_chart = st.columns([1, 1])
-
-    with col_table:
-        st.markdown("#### Cost Breakdown")
-        # Create a comparison table
-        comparison_data = []
-        for i, cat in enumerate(categories):
-            comparison_data.append({
-                "Category": cat,
-                "Default (€M)": f"{default_costs[i]/1_000_000:.2f}",
-                "Multiplier": f"{multipliers[cat]:.2f}x",
-                "Adjusted (€M)": f"{new_costs[cat]/1_000_000:.2f}",
-            })
-        comp_df = pd.DataFrame(comparison_data)
-        st.dataframe(comp_df, use_container_width=True, hide_index=True)
-
-    with col_chart:
-        st.markdown("#### CAPEX Breakdown")
-        # Plot adjusted breakdown
-        fig = breakdown_chart("CAPEX", new_costs)
-        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-    # Optional: Show cash flow impact
-    with st.expander("Updated Cash Flow"):
-        cf = new_econ["cash_flow_table"].copy()
-        for col in ["Net Cash Flow", "Discounted Cash Flow", "Cumulative Cash Flow"]:
-            cf[col] = cf[col].map(lambda v: f"€{v/1_000_000:.2f}M")
-        st.dataframe(cf, use_container_width=True, hide_index=True)
 
     # Reset button
-    if st.button("Reset to Defaults", use_container_width=True):
-        for cat in categories:
-            st.session_state.cost_multipliers[cat] = 1.0
+    if st.button("Reset All to Defaults", use_container_width=True):
+        st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
+        # Reset Multiplier and InstFactor to defaults
+        for row in st.session_state.equipment_rows:
+            row["Multiplier"] = 1.0
+            row["InstFactor"] = 2.0
+        if "editing_tag" in st.session_state:
+            del st.session_state.editing_tag
         st.rerun()
-        
+
 def main() -> None:
     inject_css()
     base_df = get_data(None)
