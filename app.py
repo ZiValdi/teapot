@@ -1219,10 +1219,10 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
 def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
-    """Equipment Costing page – Equipment Master List with inline editing via popover."""
+    """Equipment Costing page – Equipment Master List with inline popover editing."""
     st.title("Equipment Costing")
     st.markdown(
-        '<div class="status-line">● Edit each equipment item’s Multiplier and Installation Factor</div>',
+        '<div class="status-line">● Click ✏️ to edit each equipment item’s Multiplier and Installation Factor</div>',
         unsafe_allow_html=True,
     )
 
@@ -1272,7 +1272,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
                     "MOC": item["moc"],
                     "Base Cost": base_cost,
                     "Multiplier": 1.0,
-                    "InstFactor": 2.0,  # default installation factor
+                    "InstFactor": 2.0,
                 })
         return rows
 
@@ -1286,7 +1286,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         if "InstFactor" not in row:
             row["InstFactor"] = 2.0
 
-    # Compute adjusted costs and totals
+    # Compute adjusted costs
     for row in st.session_state.equipment_rows:
         row["Adjusted Cost"] = row["Base Cost"] * row["Multiplier"] * row["InstFactor"]
 
@@ -1294,7 +1294,6 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
 
     # Summary cards
     total_tic = df_equip["Adjusted Cost"].sum()
-    # PEC = sum of categories excluding Installation & Contingency
     pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
     indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
     contingency = indirect * 0.4
@@ -1312,21 +1311,13 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
 
     st.markdown("---")
 
-    # Equipment Master List with Edit buttons
+    # Equipment Master List with popover editing
     st.markdown("### Equipment Master List")
     st.caption("Click the ✏️ button to edit Multiplier and Installation Factor for each item.")
 
-    # Display the table with an Actions column
-    # We'll iterate over rows and build the table manually using columns
-    # Streamlit doesn't have a built-in editable table with per-row buttons, so we'll build it with columns.
-
-    # We'll display the table as a series of st.columns for each row.
-    # For performance, we can use st.dataframe with a custom column for buttons, but that's not interactive.
-    # So we'll build a custom table.
-
     # Header
     header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.6])
-    headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Action"]
+    headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", ""]
     for col, header in zip(header_cols, headers):
         col.markdown(f"**{header}**")
 
@@ -1352,62 +1343,45 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         with cols[8]:
             st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
         with cols[9]:
-            # Edit button
-            if st.button("✏️", key=f"edit_{row['Tag']}"):
-                st.session_state.editing_tag = row["Tag"]
-                st.rerun()
-
-    # Popover for editing (appears when a tag is selected)
-    if "editing_tag" in st.session_state and st.session_state.editing_tag is not None:
-        tag_to_edit = st.session_state.editing_tag
-        # Find the row
-        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == tag_to_edit), None)
-        if row_idx is not None:
-            row = st.session_state.equipment_rows[row_idx]
-            with st.popover(f"Edit {tag_to_edit}", use_container_width=True):
-                st.markdown(f"**{row['Description']}**")
-                st.caption(f"Category: {row['Category']} | Qty: {row['Qty']} | MOC: {row['MOC']}")
+            # Popover for editing this row
+            with st.popover("✏️", use_container_width=True):
+                st.markdown(f"**Edit {row['Tag']}**")
+                st.caption(f"{row['Description']} | {row['Category']}")
                 st.caption(f"Base Cost: €{row['Base Cost']/1e6:.2f}M")
-
+                
                 new_mult = st.number_input(
-                    "Multiplier (0.5 – 2.0)",
+                    "Multiplier",
                     min_value=0.5,
                     max_value=2.0,
                     value=row["Multiplier"],
                     step=0.05,
-                    key=f"mult_{tag_to_edit}",
+                    key=f"mult_{row['Tag']}_{idx}",
                 )
                 new_inst = st.number_input(
-                    "Installation Factor (0.5 – 4.0)",
+                    "Installation Factor",
                     min_value=0.5,
                     max_value=4.0,
                     value=row["InstFactor"],
                     step=0.1,
-                    key=f"inst_{tag_to_edit}",
+                    key=f"inst_{row['Tag']}_{idx}",
                 )
-
+                
                 col_confirm, col_cancel = st.columns(2)
                 with col_confirm:
-                    if st.button("✅ Confirm", use_container_width=True):
-                        # Update row
-                        row["Multiplier"] = new_mult
-                        row["InstFactor"] = new_inst
-                        st.session_state.equipment_rows[row_idx] = row
-                        # Clear editing state
-                        del st.session_state.editing_tag
-                        st.rerun()
+                    if st.button("✅ Confirm", key=f"confirm_{row['Tag']}_{idx}", use_container_width=True):
+                        # Find the row in session state and update
+                        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
+                        if row_idx is not None:
+                            st.session_state.equipment_rows[row_idx]["Multiplier"] = new_mult
+                            st.session_state.equipment_rows[row_idx]["InstFactor"] = new_inst
+                            st.rerun()
                 with col_cancel:
-                    if st.button("❌ Cancel", use_container_width=True):
-                        del st.session_state.editing_tag
+                    if st.button("❌ Cancel", key=f"cancel_{row['Tag']}_{idx}", use_container_width=True):
                         st.rerun()
-        else:
-            del st.session_state.editing_tag
-            st.rerun()
 
     st.markdown("---")
 
     # Recompute economics with new total CAPEX
-    # Recalculate adjusted costs after potential edits
     total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
     new_assumptions = replace(
         assumptions,
@@ -1430,14 +1404,11 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     # Reset button
     if st.button("Reset All to Defaults", use_container_width=True):
         st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
-        # Reset Multiplier and InstFactor to defaults
         for row in st.session_state.equipment_rows:
             row["Multiplier"] = 1.0
             row["InstFactor"] = 2.0
-        if "editing_tag" in st.session_state:
-            del st.session_state.editing_tag
         st.rerun()
-
+        
 def main() -> None:
     inject_css()
     base_df = get_data(None)
