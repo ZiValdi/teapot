@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -235,6 +236,7 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
     pages = {
         "Dashboard": "active",
         "Process Modeler": "active",
+        "Equipment Costing": "active",
         "Feedstock": "coming",
         "Comparison": "coming",
         "Sensitivity": "coming",
@@ -1216,6 +1218,125 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         # Show info message if no results yet
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
+def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
+    """Equipment Costing page – adjust CAPEX category multipliers and see impact on economics."""
+    st.title("Equipment Costing")
+    st.markdown(
+        '<div class="status-line">● Adjust cost multipliers for each equipment category</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Get base economics with current assumptions
+    base_econ = calculate_economics(df, assumptions)
+    base_capex_breakdown = base_econ.get("capex_breakdown", {})
+    if not base_capex_breakdown:
+        st.warning("No CAPEX breakdown available. Please check your data and assumptions.")
+        return
+
+    # Compute default total CAPEX
+    default_total = sum(base_capex_breakdown.values())
+    categories = list(base_capex_breakdown.keys())
+    default_costs = list(base_capex_breakdown.values())
+
+    st.markdown("### Adjust Cost Multipliers")
+    st.caption("Each multiplier scales the default cost for that equipment category. Changes update economics in real time.")
+
+    # Use session state to store multipliers
+    if "cost_multipliers" not in st.session_state:
+        st.session_state.cost_multipliers = {cat: 1.0 for cat in categories}
+
+    # Display sliders for each category
+    col1, col2 = st.columns([1, 1])
+    multipliers = {}
+    with col1:
+        for cat in categories[:len(categories)//2]:
+            multipliers[cat] = st.slider(
+                f"{cat}",
+                min_value=0.5,
+                max_value=2.0,
+                value=st.session_state.cost_multipliers.get(cat, 1.0),
+                step=0.05,
+                key=f"cost_{cat}",
+            )
+    with col2:
+        for cat in categories[len(categories)//2:]:
+            multipliers[cat] = st.slider(
+                f"{cat}",
+                min_value=0.5,
+                max_value=2.0,
+                value=st.session_state.cost_multipliers.get(cat, 1.0),
+                step=0.05,
+                key=f"cost_{cat}",
+            )
+
+    # Update session state
+    for cat, val in multipliers.items():
+        st.session_state.cost_multipliers[cat] = val
+
+    # Compute new costs
+    new_costs = {cat: default_costs[i] * multipliers[cat] for i, cat in enumerate(categories)}
+    new_total = sum(new_costs.values())
+
+    # Update assumptions with new CAPEX (override base_capex_meur)
+    # We keep capacity constant, so base_capex_meur = new_total / 1e6
+    new_assumptions = replace(
+        assumptions,
+        base_capex_meur=new_total / 1_000_000,
+    )
+
+    # Recalculate economics with new assumptions
+    new_econ = calculate_economics(df, new_assumptions)
+    new_kpis = new_econ["kpis"]
+
+    # Display results
+    st.markdown("### Results")
+
+    # KPI row
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Total CAPEX", new_kpis["capex"], delta=f"{(new_total/default_total - 1)*100:.1f}%")
+    with k2:
+        st.metric("NPV", new_kpis["npv"])
+    with k3:
+        st.metric("IRR", new_kpis["irr"])
+    with k4:
+        st.metric("Payback", new_kpis["payback"])
+
+    # Two columns: table and chart
+    col_table, col_chart = st.columns([1, 1])
+
+    with col_table:
+        st.markdown("#### Cost Breakdown")
+        # Create a comparison table
+        comparison_data = []
+        for i, cat in enumerate(categories):
+            comparison_data.append({
+                "Category": cat,
+                "Default (€M)": f"{default_costs[i]/1_000_000:.2f}",
+                "Multiplier": f"{multipliers[cat]:.2f}x",
+                "Adjusted (€M)": f"{new_costs[cat]/1_000_000:.2f}",
+            })
+        comp_df = pd.DataFrame(comparison_data)
+        st.dataframe(comp_df, use_container_width=True, hide_index=True)
+
+    with col_chart:
+        st.markdown("#### CAPEX Breakdown")
+        # Plot adjusted breakdown
+        fig = breakdown_chart("CAPEX", new_costs)
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    # Optional: Show cash flow impact
+    with st.expander("Updated Cash Flow"):
+        cf = new_econ["cash_flow_table"].copy()
+        for col in ["Net Cash Flow", "Discounted Cash Flow", "Cumulative Cash Flow"]:
+            cf[col] = cf[col].map(lambda v: f"€{v/1_000_000:.2f}M")
+        st.dataframe(cf, use_container_width=True, hide_index=True)
+
+    # Reset button
+    if st.button("Reset to Defaults", use_container_width=True):
+        for cat in categories:
+            st.session_state.cost_multipliers[cat] = 1.0
+        st.rerun()
 
 def main() -> None:
     inject_css()
@@ -1272,6 +1393,8 @@ def main() -> None:
         show_process_modeler(df, assumptions, run_uncertainty, samples, variation)
     elif st.session_state.page == "Risk Analysis":
         show_risk_analysis(df, assumptions)
+    elif st.session_state.page == "Equipment Costing":
+        show_equipment_costing(df, assumptions)
     else:
         st.title(st.session_state.page)
         st.info("This page is under development. Please check back later.")
