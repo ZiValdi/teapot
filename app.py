@@ -618,11 +618,15 @@ def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncer
         with column:
             recommendation_card(item)
 
+
 def create_flowsheet_figure(highlight: str = None) -> go.Figure:
-    """Create a flowsheet diagram with unit blocks; highlight the selected unit."""
+    """
+    Create a process flowsheet diagram with unit blocks.
+    The highlighted unit (if any) gets a cyan border.
+    """
     fig = go.Figure()
 
-    # Define unit positions (x, y) for a horizontal layout
+    # Unit positions (x, y) – horizontal layout
     units = {
         "Biomass Feed": (0.05, 0.5),
         "Rotary Dryer": (0.20, 0.5),
@@ -632,11 +636,12 @@ def create_flowsheet_figure(highlight: str = None) -> go.Figure:
         "Liquid Storage": (0.88, 0.5),
     }
 
-    # Draw connecting lines (pipes) with arrows
+    # Draw connecting lines with arrows
     main_path = ["Biomass Feed", "Rotary Dryer", "Pyrolyzer", "Cyclone", "Condenser", "Liquid Storage"]
     for i in range(len(main_path)-1):
         x0, y0 = units[main_path[i]]
         x1, y1 = units[main_path[i+1]]
+        # Line
         fig.add_shape(
             type="line",
             x0=x0 + 0.03, y0=y0, x1=x1 - 0.03, y1=y1,
@@ -651,20 +656,19 @@ def create_flowsheet_figure(highlight: str = None) -> go.Figure:
             arrowwidth=2,
         )
 
-    # Draw unit blocks
+    # Draw unit rectangles with ports (small circles)
     for label, (x, y) in units.items():
-        # Determine if this unit is the highlighted one
         border_color = "#22d3ee" if label == highlight else "#334155"
-        shadow = "rgba(34,211,238,0.3)" if label == highlight else "transparent"
-
+        # Main block
         fig.add_shape(
             type="rect",
-            x0=x-0.06, y0=y-0.08, x1=x+0.06, y1=y+0.08,
+            x0=x-0.065, y0=y-0.09, x1=x+0.065, y1=y+0.09,
             line=dict(color=border_color, width=2),
             fillcolor="#1e293b",
-            opacity=0.9,
+            opacity=0.95,
             layer="below",
         )
+        # Label
         fig.add_annotation(
             x=x, y=y,
             text=label,
@@ -673,7 +677,41 @@ def create_flowsheet_figure(highlight: str = None) -> go.Figure:
             align="center",
         )
 
-    # Add a decorative box around the figure
+        # Ports (input on left, output on right) – only for units with connections
+        if label in main_path and label != "Biomass Feed":
+            # Input port (left)
+            fig.add_shape(
+                type="circle",
+                x0=x-0.065-0.01, y0=y-0.015, x1=x-0.065+0.01, y1=y+0.015,
+                fillcolor="#94a3b8",
+                line=dict(color="#334155", width=1),
+                layer="above",
+            )
+        if label in main_path and label != "Liquid Storage":
+            # Output port (right)
+            color = "#22d3ee" if label == highlight else "#94a3b8"
+            fig.add_shape(
+                type="circle",
+                x0=x+0.065-0.01, y0=y-0.015, x1=x+0.065+0.01, y1=y+0.015,
+                fillcolor=color,
+                line=dict(color="#334155", width=1),
+                layer="above",
+            )
+
+    # Additional labels (N₂, gas)
+    fig.add_annotation(
+        x=0.40, y=0.70,
+        text="N₂ Supply",
+        showarrow=False,
+        font=dict(color="#f59e0b", size=9),
+    )
+    fig.add_annotation(
+        x=0.70, y=0.70,
+        text="Gas to flue",
+        showarrow=False,
+        font=dict(color="#94a3b8", size=9),
+    )
+
     fig.update_layout(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -682,22 +720,24 @@ def create_flowsheet_figure(highlight: str = None) -> go.Figure:
         margin=dict(l=10, r=10, t=10, b=10),
         height=300,
         font=dict(color="#dae2fd"),
+        hovermode=False,
     )
 
     return fig
 
+
 def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncertainty: bool, samples: int, variation: float) -> None:
-    """Process Modeler with clickable unit blocks and property inspector."""
+    """Process Modeler with clickable unit blocks, property inspector, and live economics."""
     st.title("Process Modeler")
     st.markdown(
         '<div class="status-line">● Design your pyrolysis process – select a unit to configure</div>',
         unsafe_allow_html=True,
     )
 
-    # Define available unit operations
+    # Define units and their parameters (ranges, steps, initial values)
     units = {
         "Biomass Feed": {
-            "icon": "🍃",
+            "icon": "🌾",
             "params": {"Flow (kg/h)": 500, "Moisture (%)": 15},
             "range": {"Flow (kg/h)": (50, 2000), "Moisture (%)": (0, 50)},
             "step": {"Flow (kg/h)": 10, "Moisture (%)": 1},
@@ -710,9 +750,30 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         },
         "Pyrolyzer": {
             "icon": "🔥",
-            "params": {"Temperature (°C)": 550, "Pressure (atm)": 1.0, "Heating Rate (°C/min)": 50, "Residence Time (s)": 2},
-            "range": {"Temperature (°C)": (300, 800), "Pressure (atm)": (0.5, 2.0), "Heating Rate (°C/min)": (1, 300), "Residence Time (s)": (0.5, 10)},
-            "step": {"Temperature (°C)": 5, "Pressure (atm)": 0.1, "Heating Rate (°C/min)": 1, "Residence Time (s)": 0.5},
+            "params": {
+                "Temperature (°C)": 550,
+                "Pressure (atm)": 1.0,
+                "Heating Rate (°C/min)": 50,
+                "Residence Time (s)": 2,
+                "N₂ Flow (mL/min)": 100,
+                "Particle Size (μm)": 500,
+            },
+            "range": {
+                "Temperature (°C)": (300, 800),
+                "Pressure (atm)": (0.5, 2.0),
+                "Heating Rate (°C/min)": (1, 300),
+                "Residence Time (s)": (0.5, 10),
+                "N₂ Flow (mL/min)": (0, 500),
+                "Particle Size (μm)": (50, 2000),
+            },
+            "step": {
+                "Temperature (°C)": 5,
+                "Pressure (atm)": 0.1,
+                "Heating Rate (°C/min)": 1,
+                "Residence Time (s)": 0.5,
+                "N₂ Flow (mL/min)": 10,
+                "Particle Size (μm)": 50,
+            },
         },
         "Cyclone": {
             "icon": "🌀",
@@ -734,38 +795,29 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         },
     }
 
-    # Store selected unit in session state
+    # Initialize session state for selected unit and parameters
     if "selected_unit" not in st.session_state:
         st.session_state.selected_unit = "Pyrolyzer"
+    if "unit_params" not in st.session_state:
+        st.session_state.unit_params = {u: units[u]["params"].copy() for u in units}
+    # Ensure all parameters are present
+    for u, data in units.items():
+        for p, v in data["params"].items():
+            if p not in st.session_state.unit_params.get(u, {}):
+                st.session_state.unit_params[u][p] = v
 
     # Layout: main canvas (left) and property inspector (right)
     col_left, col_right = st.columns([2, 1])
 
     with col_left:
         st.markdown("### Process Flowsheet")
-        # Display a clean flowsheet (Plotly) – we reuse the previous figure but with a note that blocks are clickable
-        st.markdown("""
-        <div style="border:1px solid #334155; border-radius:8px; padding:16px; background: #172337;">
-            <p style="color:#94a3b8; font-size:0.9rem; text-align:center;">
-                <span style="color:#22d3ee;">●</span> Click a unit in the diagram below to configure it.
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        # We can display a more detailed Plotly flowsheet, or we can use an HTML mockup.
-        # For simplicity, I'll use a static Plotly figure with unit labels as clickable annotations.
-        # Since Plotly annotations cannot trigger callbacks, we'll use a selectbox or a set of buttons above the diagram.
-
-        # But to make it look like the mockup, we can display an SVG or HTML with clickable areas,
-        # but that's complex. Instead, we'll place a row of unit buttons above the figure.
-        # These buttons act as the "clickable" units.
-
-        # Create a row of unit selection buttons
+        # Row of unit selection buttons (clickable blocks)
         unit_cols = st.columns(len(units))
-        for idx, (unit_name, _) in enumerate(units.items()):
+        for idx, (unit_name, data) in enumerate(units.items()):
             with unit_cols[idx]:
+                icon = data.get("icon", "⚙️")
                 if st.button(
-                    f"{units[unit_name]['icon']} {unit_name}",
+                    f"{icon} {unit_name}",
                     key=f"unit_btn_{unit_name}",
                     use_container_width=True,
                     type="primary" if st.session_state.selected_unit == unit_name else "secondary",
@@ -773,84 +825,77 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
                     st.session_state.selected_unit = unit_name
                     st.rerun()
 
-        # Now render the flowsheet as a Plotly figure (using the improved create_flowsheet_figure)
-        # We'll highlight the selected unit by changing its border color.
+        # Display the flowsheet with highlighted unit
         fig = create_flowsheet_figure(highlight=st.session_state.selected_unit)
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
+        # Floating toolbar (mockup)
+        st.markdown(
+            """
+            <div style="display:flex; justify-content:center; gap:8px; margin-top:8px;">
+                <span style="background:#1e293b; border:1px solid #334155; color:#94a3b8; padding:6px 12px; border-radius:20px; font-size:12px;">🔍 Zoom In</span>
+                <span style="background:#1e293b; border:1px solid #334155; color:#94a3b8; padding:6px 12px; border-radius:20px; font-size:12px;">🔍 Zoom Out</span>
+                <span style="background:#1e293b; border:1px solid #334155; color:#94a3b8; padding:6px 12px; border-radius:20px; font-size:12px;">➕ Add Unit</span>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
     with col_right:
         st.markdown("### Property Inspector")
-        # Show parameters for the selected unit
-        unit = units[st.session_state.selected_unit]
-        st.markdown(f"**{unit['icon']} {st.session_state.selected_unit}**")
+        unit_name = st.session_state.selected_unit
+        data = units[unit_name]
+        st.markdown(f"**{data['icon']} {unit_name}**")
         st.caption("Adjust parameters to see impact on yield and economics.")
 
-        # Create a dictionary to store updated parameters
-        updated_params = {}
-        for param, value in unit["params"].items():
-            min_val, max_val = unit["range"].get(param, (0, 100))
-            step = unit["step"].get(param, 1)
-            # For integer parameters, use number_input; for others, use slider
-            if isinstance(value, int):
-                new_val = st.number_input(
-                    param,
-                    min_value=int(min_val),
-                    max_value=int(max_val),
-                    value=int(value),
-                    step=int(step),
-                    key=f"param_{st.session_state.selected_unit}_{param}",
-                )
-            else:
-                new_val = st.slider(
-                    param,
-                    min_value=float(min_val),
-                    max_value=float(max_val),
-                    value=float(value),
-                    step=float(step),
-                    key=f"param_{st.session_state.selected_unit}_{param}",
-                )
-            updated_params[param] = new_val
+        # Editable parameters for the selected unit
+        params = st.session_state.unit_params[unit_name]
+        updated = False
+        for param, value in params.items():
+            min_val, max_val = data["range"].get(param, (0, 100))
+            step = data["step"].get(param, 1)
+            # Use number_input for numeric parameters
+            new_val = st.number_input(
+                param,
+                min_value=float(min_val),
+                max_value=float(max_val),
+                value=float(value),
+                step=float(step),
+                key=f"param_{unit_name}_{param}",
+                format="%g",
+            )
+            if new_val != value:
+                params[param] = new_val
+                updated = True
 
-        # Update the unit's parameters in the units dict (stored in session state for persistence)
-        if "unit_params" not in st.session_state:
-            st.session_state.unit_params = {}
-        # We'll store all unit params in a nested dict
-        if st.session_state.selected_unit not in st.session_state.unit_params:
-            st.session_state.unit_params[st.session_state.selected_unit] = unit["params"].copy()
-        # Update with new values
-        for k, v in updated_params.items():
-            st.session_state.unit_params[st.session_state.selected_unit][k] = v
+        if updated:
+            # Update session state
+            st.session_state.unit_params[unit_name] = params
+            # Force rerun to update predictions
+            st.rerun()
 
-        # Now use these parameters to drive the yield prediction
-        # Extract key parameters that affect yield (temp, heating rate, etc.)
-        pyro_params = st.session_state.unit_params.get("Pyrolyzer", {})
-        temp = pyro_params.get("Temperature (°C)", 550)
-        heating_rate = pyro_params.get("Heating Rate (°C/min)", 50)
-        # For N2 flow and particle size, we can also include them from other units or keep as sliders.
-        # For simplicity, we can still use the sliders from the original Process Modeler,
-        # but now we can also read from the inspector.
+        # Extract key parameters for yield prediction (from Pyrolyzer)
+        pyro = st.session_state.unit_params.get("Pyrolyzer", {})
+        temp = pyro.get("Temperature (°C)", 550)
+        heating_rate = pyro.get("Heating Rate (°C/min)", 50)
+        n2_flow = pyro.get("N₂ Flow (mL/min)", 100)
+        particle_size = pyro.get("Particle Size (μm)", 500)
 
-        # Predict yield using the current parameters
-        # We'll use the same predict_yield function, but pass the values from the inspector.
-        # However, we still need N2 flow and particle size – we can have them as global sliders or derive from units.
-        # Let's keep them as separate sliders outside the inspector, or include them in the "Pyrolyzer" unit.
-        # I'll add them to the Pyrolyzer parameters above.
-
-        # After updating the parameters, we can recompute yield and economics
+        # Predict yield using KNN
         predicted_yield = predict_yield(
             df,
             temperature=temp,
             heating_rate=heating_rate,
-            n2_flow=100,  # default or from another unit
-            particle_size=500,  # default
+            n2_flow=n2_flow,
+            particle_size=particle_size,
             k=5,
         )
 
-        # Display the predicted yield and economics as before
+        # Display predicted yield and economics
         st.markdown("### Predicted Bio‑Liquid Yield")
         st.metric(label="", value=f"{predicted_yield:.1f}%", delta=None)
 
-        # Prepare single-row DataFrame for economics
+        # Run economics on a single row with the predicted yield
         sample_row = df.iloc[[0]].copy()
         sample_row["bio_liquid_yield_pct"] = predicted_yield
         economics = calculate_economics(sample_row, assumptions)
@@ -864,6 +909,26 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         with ecol2:
             st.metric("Payback", economic_kpis["payback"])
             st.metric("CAPEX", economic_kpis["capex"])
+
+        # Product yield table (estimated from prediction)
+        st.markdown("### Estimated Product Yields")
+        # Simple model: bio-oil = predicted_yield, gas = 20% of total, char = 15% of total
+        bio_oil = predicted_yield
+        gas = 0.2 * predicted_yield
+        char = 0.15 * predicted_yield
+        total = bio_oil + gas + char
+        if total > 0:
+            bio_oil_pct = bio_oil / total * 100
+            gas_pct = gas / total * 100
+            char_pct = char / total * 100
+        else:
+            bio_oil_pct = gas_pct = char_pct = 0
+        yield_df = pd.DataFrame({
+            "Component": ["Bio‑oil", "Syngas", "Biochar"],
+            "wt %": [f"{bio_oil_pct:.1f}", f"{gas_pct:.1f}", f"{char_pct:.1f}"],
+        })
+        st.dataframe(yield_df, use_container_width=True, hide_index=True)
+
 
 def main() -> None:
     inject_css()
