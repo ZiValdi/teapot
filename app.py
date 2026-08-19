@@ -1067,127 +1067,151 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
     st.markdown("### Simulation Settings")
     col1, col2, col3 = st.columns(3)
     with col1:
-        samples = st.number_input("Number of samples", min_value=50, max_value=5000, value=1000, step=50)
+        samples = st.number_input("Number of samples", min_value=50, max_value=5000, value=1000, step=50, key="risk_samples")
     with col2:
-        variation = st.slider("Input variation (±%)", min_value=5, max_value=50, value=20, step=5)
+        variation = st.slider("Input variation (±%)", min_value=5, max_value=50, value=20, step=5, key="risk_variation")
     with col3:
-        seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1)
+        seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1, key="risk_seed")
+    
+    target_irr = st.number_input("Target IRR (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5, key="risk_target")
 
-    # Target IRR threshold
-    target_irr = st.number_input("Target IRR (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5)
+    # Generate a key based on current parameters to detect changes
+    params_key = f"{samples}_{variation}_{seed}"
 
+    # Initialize session state for results if not present
+    if "risk_results" not in st.session_state:
+        st.session_state.risk_results = None
+    if "risk_params_key" not in st.session_state:
+        st.session_state.risk_params_key = None
+
+    # Run button
     run_button = st.button("▶ Run Monte Carlo Simulation", use_container_width=True, type="primary")
 
-    if not run_button:
-        st.info("Click the button above to run the uncertainty analysis. This may take a few seconds.")
-        return
+    # Determine if we need to run (button clicked or parameters changed)
+    should_run = run_button or (st.session_state.risk_results is None) or (st.session_state.risk_params_key != params_key)
 
-    with st.spinner("Running Monte Carlo simulation..."):
-        summary, sensitivity, samples_df = run_uncertainty_analysis(
-            df,
-            assumptions,
-            sample_count=samples,
-            variation_pct=variation,
-            seed=seed,
-            return_samples=True,
+    if should_run:
+        with st.spinner("Running Monte Carlo simulation..."):
+            summary, sensitivity, samples_df = run_uncertainty_analysis(
+                df,
+                assumptions,
+                sample_count=samples,
+                variation_pct=variation,
+                seed=seed,
+                return_samples=True,
+            )
+            if summary.empty or sensitivity.empty or samples_df is None:
+                st.warning("Analysis returned no results. Please adjust settings and try again.")
+                return
+            st.session_state.risk_results = {
+                "summary": summary,
+                "sensitivity": sensitivity,
+                "samples_df": samples_df,
+            }
+            st.session_state.risk_params_key = params_key
+            # Rerun to display results
+            st.rerun()
+
+    # Display results if available
+    if st.session_state.risk_results is not None:
+        results = st.session_state.risk_results
+        summary = results["summary"]
+        sensitivity = results["sensitivity"]
+        samples_df = results["samples_df"]
+
+        # Extract samples
+        irr_samples = samples_df["IRR"].dropna()
+        npv_samples = samples_df["NPV"].dropna()
+
+        # --- KPI Cards ---
+        st.markdown("### Key Risk Metrics")
+        k1, k2, k3, k4 = st.columns(4)
+        with k1:
+            st.metric("Expected IRR", f"{irr_samples.mean():.1f}%", delta="Mean")
+        with k2:
+            var = irr_samples.quantile(0.05)
+            st.metric("Value at Risk (VaR 5%)", f"{var:.1f}%", delta="P5", delta_color="inverse")
+        with k3:
+            p95 = irr_samples.quantile(0.95)
+            st.metric("Upside (P95)", f"{p95:.1f}%", delta="P95")
+        with k4:
+            st.metric("Std Deviation", f"{irr_samples.std():.1f}%")
+
+        st.markdown("---")
+
+        # --- Distribution Plot ---
+        st.markdown("### IRR Distribution")
+        show_cdf = st.toggle("Show CDF overlay", value=True, key="risk_show_cdf")
+        fig = create_distribution_plot(
+            irr_samples,
+            title="",
+            xlabel="IRR (%)",
+            target_value=target_irr,
+            target_label="Target IRR",
+            show_cdf=show_cdf,
         )
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
 
-    if summary.empty or sensitivity.empty or samples_df is None:
-        st.warning("Analysis returned no results. Please adjust settings and try again.")
-        return
+        st.markdown("---")
 
-    # --- KPI Cards (from samples) ---
-    irr_samples = samples_df["IRR"].dropna()
-    npv_samples = samples_df["NPV"].dropna()
+        # --- Variance Contribution Chart ---
+        st.markdown("### Variance Drivers")
+        # Compute variance contribution from absolute correlation (normalized)
+        sensitivity["abs_contrib"] = sensitivity["NPV correlation"].abs()
+        total_contrib = sensitivity["abs_contrib"].sum()
+        sensitivity["contrib_pct"] = (sensitivity["abs_contrib"] / total_contrib * 100).round(1)
 
-    st.markdown("### Key Risk Metrics")
-    k1, k2, k3, k4 = st.columns(4)
-    with k1:
-        st.metric("Expected IRR", f"{irr_samples.mean():.1f}%", delta="Mean")
-    with k2:
-        var = irr_samples.quantile(0.05)
-        st.metric("Value at Risk (VaR 5%)", f"{var:.1f}%", delta="P5", delta_color="inverse")
-    with k3:
-        p95 = irr_samples.quantile(0.95)
-        st.metric("Upside (P95)", f"{p95:.1f}%", delta="P95")
-    with k4:
-        st.metric("Std Deviation", f"{irr_samples.std():.1f}%")
+        # Sort descending for horizontal bar
+        sensitivity_sorted = sensitivity.sort_values("contrib_pct", ascending=True)
 
-    st.markdown("---")
+        fig_contrib = go.Figure()
+        fig_contrib.add_trace(go.Bar(
+            y=sensitivity_sorted["Parameter"],
+            x=sensitivity_sorted["contrib_pct"],
+            orientation='h',
+            marker_color='#22d3ee',
+            text=sensitivity_sorted["contrib_pct"].map(lambda v: f"{v:.1f}%"),
+            textposition='outside',
+            hovertemplate='%{y}: %{x:.1f}%<extra></extra>',
+        ))
+        fig_contrib.update_layout(
+            title="Contribution to NPV Variance",
+            xaxis_title="Contribution (%)",
+            yaxis_title="",
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#dae2fd'),
+            height=350,
+            margin=dict(l=10, r=40, t=40, b=10),
+            xaxis=dict(gridcolor='#334155'),
+        )
+        st.plotly_chart(fig_contrib, use_container_width=True, config={'displayModeBar': False})
 
-    # --- Distribution Plot with PDF/CDF toggle ---
-    st.markdown("### IRR Distribution")
-    show_cdf = st.toggle("Show CDF overlay", value=True)
+        st.markdown("---")
 
-    # Create the distribution plot
-    fig = create_distribution_plot(
-        irr_samples,
-        title="",
-        xlabel="IRR (%)",
-        target_value=target_irr,
-        target_label="Target IRR",
-        show_cdf=show_cdf,
-    )
-    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        # --- Tables ---
+        col_left, col_right = st.columns([1, 1])
+        with col_left:
+            st.markdown("#### Percentile Summary")
+            st.dataframe(summary, use_container_width=True, hide_index=True)
+        with col_right:
+            st.markdown("#### Scenario Table")
+            scenario_data = []
+            for indicator in summary["Indicator"]:
+                p5 = summary[summary["Indicator"] == indicator]["P5"].values[0]
+                p50 = summary[summary["Indicator"] == indicator]["P50"].values[0]
+                p95 = summary[summary["Indicator"] == indicator]["P95"].values[0]
+                scenario_data.append({"Indicator": indicator, "Worst (P5)": p5, "Base (P50)": p50, "Best (P95)": p95})
+            scenario_df = pd.DataFrame(scenario_data)
+            st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
-
-    # --- Variance Contribution Chart ---
-    st.markdown("### Variance Drivers")
-    # Compute variance contribution from absolute correlation (normalized)
-    sensitivity["abs_contrib"] = sensitivity["NPV correlation"].abs()
-    total_contrib = sensitivity["abs_contrib"].sum()
-    sensitivity["contrib_pct"] = (sensitivity["abs_contrib"] / total_contrib * 100).round(1)
-
-    # Sort descending
-    sensitivity_sorted = sensitivity.sort_values("contrib_pct", ascending=True)
-
-    fig_contrib = go.Figure()
-    fig_contrib.add_trace(go.Bar(
-        y=sensitivity_sorted["Parameter"],
-        x=sensitivity_sorted["contrib_pct"],
-        orientation='h',
-        marker_color='#22d3ee',
-        text=sensitivity_sorted["contrib_pct"].map(lambda v: f"{v:.1f}%"),
-        textposition='outside',
-        hovertemplate='%{y}: %{x:.1f}%<extra></extra>',
-    ))
-    fig_contrib.update_layout(
-        title="Contribution to NPV Variance",
-        xaxis_title="Contribution (%)",
-        yaxis_title="",
-        paper_bgcolor='rgba(0,0,0,0)',
-        plot_bgcolor='rgba(0,0,0,0)',
-        font=dict(color='#dae2fd'),
-        height=350,
-        margin=dict(l=10, r=40, t=40, b=10),
-        xaxis=dict(gridcolor='#334155'),
-    )
-    st.plotly_chart(fig_contrib, use_container_width=True, config={'displayModeBar': False})
-
-    st.markdown("---")
-
-    # --- Summary Tables (side by side) ---
-    col_left, col_right = st.columns([1, 1])
-    with col_left:
-        st.markdown("#### Percentile Summary")
-        st.dataframe(summary, use_container_width=True, hide_index=True)
-
-    with col_right:
-        st.markdown("#### Scenario Table")
-        scenario_data = []
-        for indicator in summary["Indicator"]:
-            p5 = summary[summary["Indicator"] == indicator]["P5"].values[0]
-            p50 = summary[summary["Indicator"] == indicator]["P50"].values[0]
-            p95 = summary[summary["Indicator"] == indicator]["P95"].values[0]
-            scenario_data.append({"Indicator": indicator, "Worst (P5)": p5, "Base (P50)": p50, "Best (P95)": p95})
-        scenario_df = pd.DataFrame(scenario_data)
-        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
-
-    # Additional: Probability of reaching target
-    prob_success = (irr_samples > target_irr).mean() * 100
-    st.success(f"✅ Probability of IRR exceeding {target_irr:.1f}%: **{prob_success:.1f}%**")
-    
+        # Probability of success
+        prob_success = (irr_samples > target_irr).mean() * 100
+        st.success(f"✅ Probability of IRR exceeding {target_irr:.1f}%: **{prob_success:.1f}%**")
+    else:
+        # Show info message if no results yet
+        st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
+            
 def main() -> None:
     inject_css()
     base_df = get_data(None)
