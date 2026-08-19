@@ -23,10 +23,13 @@ def run_uncertainty_analysis(
     sample_count: int,
     variation_pct: float,
     seed: int = 42,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+    return_samples: bool = False,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
     if df.empty:
         empty_summary = pd.DataFrame(columns=["Indicator", "P5", "P50", "P95"])
         empty_sensitivity = pd.DataFrame(columns=["Parameter", "NPV correlation", "MSP correlation"])
+        if return_samples:
+            return empty_summary, empty_sensitivity, pd.DataFrame()
         return empty_summary, empty_sensitivity
 
     rng = np.random.default_rng(seed)
@@ -113,8 +116,10 @@ def run_uncertainty_analysis(
     )
     sensitivity["NPV correlation"] = sensitivity["NPV correlation"].map(lambda value: round(value, 2))
     sensitivity["MSP correlation"] = sensitivity["MSP correlation"].map(lambda value: round(value, 2))
-    return summary, sensitivity
 
+    if return_samples:
+        return summary, sensitivity, output_df
+    return summary, sensitivity, None
 
 def _format_meur(value: float) -> str:
     return f"€{value / 1_000_000:.2f}M"

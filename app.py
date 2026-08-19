@@ -455,6 +455,133 @@ def sensitivity_chart(sensitivity: pd.DataFrame) -> go.Figure:
     )
     return fig
 
+def create_distribution_plot(
+    samples: pd.Series,
+    title: str,
+    xlabel: str = "",
+    target_value: float = None,
+    target_label: str = "Target",
+    show_cdf: bool = True,
+) -> go.Figure:
+    """
+    Create a distribution plot with histogram, KDE, and percentile lines.
+    Optionally show CDF overlay.
+    """
+    from scipy.stats import gaussian_kde
+
+    # Compute KDE
+    kde = gaussian_kde(samples)
+    x_range = np.linspace(samples.min(), samples.max(), 200)
+    kde_values = kde(x_range)
+
+    fig = go.Figure()
+
+    # Histogram (PDF)
+    fig.add_trace(go.Histogram(
+        x=samples,
+        nbinsx=min(50, len(samples)//10),
+        histnorm='probability density',
+        name='PDF',
+        marker=dict(color='#22d3ee', opacity=0.5, line=dict(color='#22d3ee', width=0.5)),
+        hovertemplate='Value: %{x:.1f}<br>Density: %{y:.3f}<extra></extra>',
+    ))
+
+    # KDE curve
+    fig.add_trace(go.Scatter(
+        x=x_range,
+        y=kde_values,
+        mode='lines',
+        name='KDE',
+        line=dict(color='#22d3ee', width=2.5),
+    ))
+
+    # Percentile lines
+    percentiles = [0.05, 0.50, 0.95]
+    colors = ['#ffb4ab', '#4edea3', '#f59e0b']
+    labels = ['VaR (P5)', 'Median', 'P95']
+    for p, color, label in zip(percentiles, colors, labels):
+        val = samples.quantile(p)
+        fig.add_vline(
+            x=val,
+            line_dash='dash',
+            line_color=color,
+            annotation_text=f'{label}: {val:.1f}',
+            annotation_position='top',
+            annotation_font=dict(color=color, size=12),
+        )
+
+    # Mean line
+    mean_val = samples.mean()
+    fig.add_vline(
+        x=mean_val,
+        line_dash='solid',
+        line_color='#22d3ee',
+        annotation_text=f'Mean: {mean_val:.1f}',
+        annotation_position='bottom',
+        annotation_font=dict(color='#22d3ee', size=12),
+    )
+
+    # Target threshold (if provided)
+    if target_value is not None:
+        fig.add_vline(
+            x=target_value,
+            line_dash='dot',
+            line_color='#ffb147',
+            annotation_text=f'{target_label}: {target_value:.1f}%',
+            annotation_position='top',
+            annotation_font=dict(color='#ffb147', size=12),
+        )
+        # Probability of exceeding target
+        prob_exceed = (samples > target_value).mean() * 100
+        fig.add_annotation(
+            x=0.95, y=0.9,
+            xref='paper', yref='paper',
+            text=f'Probability > {target_value:.1f}%: {prob_exceed:.1f}%',
+            showarrow=False,
+            font=dict(color='#ffb147', size=13),
+            bgcolor='rgba(11,19,38,0.8)',
+        )
+
+    # Layout
+    fig.update_layout(
+        title=dict(text=title, font=dict(color='#dae2fd', size=18)),
+        xaxis=dict(title=xlabel, title_font=dict(color='#94a3b8'), tickfont=dict(color='#94a3b8'), gridcolor='#334155'),
+        yaxis=dict(title='Density', title_font=dict(color='#94a3b8'), tickfont=dict(color='#94a3b8'), gridcolor='#334155'),
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#dae2fd'),
+        legend=dict(font=dict(color='#dae2fd'), bgcolor='rgba(0,0,0,0)'),
+        hovermode='x',
+        margin=dict(l=40, r=40, t=80, b=40),
+        height=400,
+    )
+
+    # Optional CDF overlay – we can use another trace
+    if show_cdf:
+        # Compute empirical CDF
+        sorted_samples = np.sort(samples)
+        cdf_y = np.arange(1, len(sorted_samples)+1) / len(sorted_samples)
+        fig.add_trace(go.Scatter(
+            x=sorted_samples,
+            y=cdf_y,
+            mode='lines',
+            name='CDF',
+            line=dict(color='#4edea3', dash='dot', width=2),
+            yaxis='y2',
+        ))
+        fig.update_layout(
+            yaxis2=dict(
+                title='Cumulative Probability',
+                title_font=dict(color='#4edea3'),
+                tickfont=dict(color='#4edea3'),
+                gridcolor='rgba(0,0,0,0)',
+                overlaying='y',
+                side='right',
+                range=[0, 1],
+            ),
+        )
+
+    return fig
 
 def composition_chart(composition: dict[str, float]) -> go.Figure:
     fig = go.Figure(
@@ -940,11 +1067,14 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
     st.markdown("### Simulation Settings")
     col1, col2, col3 = st.columns(3)
     with col1:
-        samples = st.number_input("Number of samples", min_value=50, max_value=5000, value=500, step=50)
+        samples = st.number_input("Number of samples", min_value=50, max_value=5000, value=1000, step=50)
     with col2:
         variation = st.slider("Input variation (±%)", min_value=5, max_value=50, value=20, step=5)
     with col3:
         seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1)
+
+    # Target IRR threshold
+    target_irr = st.number_input("Target IRR (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5)
 
     run_button = st.button("▶ Run Monte Carlo Simulation", use_container_width=True, type="primary")
 
@@ -953,30 +1083,98 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         return
 
     with st.spinner("Running Monte Carlo simulation..."):
-        summary, sensitivity = run_uncertainty_analysis(
+        summary, sensitivity, samples_df = run_uncertainty_analysis(
             df,
             assumptions,
             sample_count=samples,
             variation_pct=variation,
             seed=seed,
+            return_samples=True,
         )
 
-    if summary.empty or sensitivity.empty:
+    if summary.empty or sensitivity.empty or samples_df is None:
         st.warning("Analysis returned no results. Please adjust settings and try again.")
         return
 
-    st.markdown("### Results")
+    # --- KPI Cards (from samples) ---
+    irr_samples = samples_df["IRR"].dropna()
+    npv_samples = samples_df["NPV"].dropna()
 
-    # Layout: summary table and scenario table
+    st.markdown("### Key Risk Metrics")
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("Expected IRR", f"{irr_samples.mean():.1f}%", delta="Mean")
+    with k2:
+        var = irr_samples.quantile(0.05)
+        st.metric("Value at Risk (VaR 5%)", f"{var:.1f}%", delta="P5", delta_color="inverse")
+    with k3:
+        p95 = irr_samples.quantile(0.95)
+        st.metric("Upside (P95)", f"{p95:.1f}%", delta="P95")
+    with k4:
+        st.metric("Std Deviation", f"{irr_samples.std():.1f}%")
+
+    st.markdown("---")
+
+    # --- Distribution Plot with PDF/CDF toggle ---
+    st.markdown("### IRR Distribution")
+    show_cdf = st.toggle("Show CDF overlay", value=True)
+
+    # Create the distribution plot
+    fig = create_distribution_plot(
+        irr_samples,
+        title="",
+        xlabel="IRR (%)",
+        target_value=target_irr,
+        target_label="Target IRR",
+        show_cdf=show_cdf,
+    )
+    st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+    st.markdown("---")
+
+    # --- Variance Contribution Chart ---
+    st.markdown("### Variance Drivers")
+    # Compute variance contribution from absolute correlation (normalized)
+    sensitivity["abs_contrib"] = sensitivity["NPV correlation"].abs()
+    total_contrib = sensitivity["abs_contrib"].sum()
+    sensitivity["contrib_pct"] = (sensitivity["abs_contrib"] / total_contrib * 100).round(1)
+
+    # Sort descending
+    sensitivity_sorted = sensitivity.sort_values("contrib_pct", ascending=True)
+
+    fig_contrib = go.Figure()
+    fig_contrib.add_trace(go.Bar(
+        y=sensitivity_sorted["Parameter"],
+        x=sensitivity_sorted["contrib_pct"],
+        orientation='h',
+        marker_color='#22d3ee',
+        text=sensitivity_sorted["contrib_pct"].map(lambda v: f"{v:.1f}%"),
+        textposition='outside',
+        hovertemplate='%{y}: %{x:.1f}%<extra></extra>',
+    ))
+    fig_contrib.update_layout(
+        title="Contribution to NPV Variance",
+        xaxis_title="Contribution (%)",
+        yaxis_title="",
+        paper_bgcolor='rgba(0,0,0,0)',
+        plot_bgcolor='rgba(0,0,0,0)',
+        font=dict(color='#dae2fd'),
+        height=350,
+        margin=dict(l=10, r=40, t=40, b=10),
+        xaxis=dict(gridcolor='#334155'),
+    )
+    st.plotly_chart(fig_contrib, use_container_width=True, config={'displayModeBar': False})
+
+    st.markdown("---")
+
+    # --- Summary Tables (side by side) ---
     col_left, col_right = st.columns([1, 1])
-
     with col_left:
         st.markdown("#### Percentile Summary")
         st.dataframe(summary, use_container_width=True, hide_index=True)
 
     with col_right:
         st.markdown("#### Scenario Table")
-        # Extract scenario values from the summary
         scenario_data = []
         for indicator in summary["Indicator"]:
             p5 = summary[summary["Indicator"] == indicator]["P5"].values[0]
@@ -986,33 +1184,10 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         scenario_df = pd.DataFrame(scenario_data)
         st.dataframe(scenario_df, use_container_width=True, hide_index=True)
 
-    st.markdown("---")
-    st.markdown("#### Distributions")
-
-    # Distribution plots: NPV and IRR
-    # We need to re-run the analysis to get the raw samples, but the current run_uncertainty_analysis only returns summary and sensitivity.
-    # We can modify the function to also return the raw samples, but to avoid breaking existing code, we'll run a separate simulation.
-    # Since run_uncertainty_analysis does not return raw samples, we'll run a lightweight version using the same logic but without returning the full output.
-    # For simplicity, we'll use a workaround: run the simulation again but with a flag to return the raw samples? Not needed here.
-    # Instead, we can run a separate Monte Carlo simulation using the economics module directly.
-    # However, for brevity, we'll use the sensitivity table and assume it's enough.
-    # For better UX, we could rewrite run_uncertainty_analysis to return raw samples, but that's out of scope for this quick addition.
-    # We'll show a placeholder message.
-
-    st.info("Distribution plots require raw sample data. Currently we display summary and sensitivity. In a future version, we'll add histogram plots.")
-    # If we had raw samples, we could plot:
-    # fig1 = create_histogram(samples['NPV'], title='NPV Distribution')
-    # fig2 = create_histogram(samples['IRR'], title='IRR Distribution')
-    # st.plotly_chart(fig1, use_container_width=True)
-    # st.plotly_chart(fig2, use_container_width=True)
-
-    st.markdown("#### Sensitivity (Tornado Plot)")
-    if not sensitivity.empty:
-        fig = sensitivity_chart(sensitivity)
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.info("Sensitivity data is unavailable.")
-
+    # Additional: Probability of reaching target
+    prob_success = (irr_samples > target_irr).mean() * 100
+    st.success(f"✅ Probability of IRR exceeding {target_irr:.1f}%: **{prob_success:.1f}%**")
+    
 def main() -> None:
     inject_css()
     base_df = get_data(None)
