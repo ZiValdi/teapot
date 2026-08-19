@@ -1245,7 +1245,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     if "cost_multipliers" not in st.session_state:
         st.session_state.cost_multipliers = {cat: 1.0 for cat in categories}
 
-    # Display sliders for each category
+    # Display sliders for each category (two columns)
     col1, col2 = st.columns([1, 1])
     multipliers = {}
     with col1:
@@ -1278,7 +1278,6 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     new_total = sum(new_costs.values())
 
     # Update assumptions with new CAPEX (override base_capex_meur)
-    # We keep capacity constant, so base_capex_meur = new_total / 1e6
     new_assumptions = replace(
         assumptions,
         base_capex_meur=new_total / 1_000_000,
@@ -1288,19 +1287,45 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     new_econ = calculate_economics(df, new_assumptions)
     new_kpis = new_econ["kpis"]
 
-    # Display results
-    st.markdown("### Results")
+    # --- NEW: Summary Cards ---
+    st.markdown("### Cost Summary")
+    # Compute derived metrics
+    # Assume: PEC (Purchased Equipment Cost) = Sum of base costs (without installation factor)
+    # We'll approximate: PEC = sum of default_costs (i.e., equipment bare costs) * multipliers
+    pec = sum(default_costs[i] * multipliers[cat] for i, cat in enumerate(categories))
+    # Indirect costs = installation + contingency (estimated as 30% of PEC for demonstration)
+    # For a more accurate split, we'd need to know which categories include installation.
+    # For now, we'll compute indirect as total - pec (if total > pec)
+    indirect = new_total - pec if new_total > pec else 0
+    # Contingency = 15% of total (typical)
+    contingency = new_total * 0.15
 
-    # KPI row
+    # Display KPI cards
     k1, k2, k3, k4 = st.columns(4)
     with k1:
-        st.metric("Total CAPEX", new_kpis["capex"], delta=f"{(new_total/default_total - 1)*100:.1f}%")
+        st.metric("Total Installed Cost (TIC)", f"€{new_total/1_000_000:.1f}M", 
+                  delta=f"{(new_total/default_total - 1)*100:.1f}%")
     with k2:
-        st.metric("NPV", new_kpis["npv"])
+        st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1_000_000:.1f}M", 
+                  delta=f"{pec/new_total*100:.1f}% of TIC")
     with k3:
-        st.metric("IRR", new_kpis["irr"])
+        st.metric("Indirect Costs", f"€{indirect/1_000_000:.1f}M", delta="Engineering, Construction, Mgmt")
     with k4:
+        st.metric("Contingency", f"€{contingency/1_000_000:.1f}M", delta="15% of TIC")
+
+    st.markdown("---")
+
+    # --- Existing Results Section (KPIs, Table, Chart, Cash Flow) ---
+    st.markdown("### Economic Impact")
+    k1, k2, k3, k4 = st.columns(4)
+    with k1:
+        st.metric("NPV", new_kpis["npv"])
+    with k2:
+        st.metric("IRR", new_kpis["irr"])
+    with k3:
         st.metric("Payback", new_kpis["payback"])
+    with k4:
+        st.metric("Annual OPEX", new_kpis["annual_opex"])
 
     # Two columns: table and chart
     col_table, col_chart = st.columns([1, 1])
@@ -1337,7 +1362,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         for cat in categories:
             st.session_state.cost_multipliers[cat] = 1.0
         st.rerun()
-
+        
 def main() -> None:
     inject_css()
     base_df = get_data(None)
