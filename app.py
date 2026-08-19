@@ -238,7 +238,7 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         "Feedstock": "coming",
         "Comparison": "coming",
         "Sensitivity": "coming",
-        "Risk Analysis": "coming",
+        "Risk Analysis": "active",
         "Documentation": "coming",
     }
 
@@ -929,6 +929,89 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         })
         st.dataframe(yield_df, use_container_width=True, hide_index=True)
 
+def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
+    """Risk Analysis page – Monte Carlo uncertainty and sensitivity."""
+    st.title("Risk Analysis")
+    st.markdown(
+        '<div class="status-line">● Monte Carlo uncertainty analysis – assess economic risk</div>',
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("### Simulation Settings")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        samples = st.number_input("Number of samples", min_value=50, max_value=5000, value=500, step=50)
+    with col2:
+        variation = st.slider("Input variation (±%)", min_value=5, max_value=50, value=20, step=5)
+    with col3:
+        seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1)
+
+    run_button = st.button("▶ Run Monte Carlo Simulation", use_container_width=True, type="primary")
+
+    if not run_button:
+        st.info("Click the button above to run the uncertainty analysis. This may take a few seconds.")
+        return
+
+    with st.spinner("Running Monte Carlo simulation..."):
+        summary, sensitivity = run_uncertainty_analysis(
+            df,
+            assumptions,
+            sample_count=samples,
+            variation_pct=variation,
+            seed=seed,
+        )
+
+    if summary.empty or sensitivity.empty:
+        st.warning("Analysis returned no results. Please adjust settings and try again.")
+        return
+
+    st.markdown("### Results")
+
+    # Layout: summary table and scenario table
+    col_left, col_right = st.columns([1, 1])
+
+    with col_left:
+        st.markdown("#### Percentile Summary")
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+
+    with col_right:
+        st.markdown("#### Scenario Table")
+        # Extract scenario values from the summary
+        scenario_data = []
+        for indicator in summary["Indicator"]:
+            p5 = summary[summary["Indicator"] == indicator]["P5"].values[0]
+            p50 = summary[summary["Indicator"] == indicator]["P50"].values[0]
+            p95 = summary[summary["Indicator"] == indicator]["P95"].values[0]
+            scenario_data.append({"Indicator": indicator, "Worst (P5)": p5, "Base (P50)": p50, "Best (P95)": p95})
+        scenario_df = pd.DataFrame(scenario_data)
+        st.dataframe(scenario_df, use_container_width=True, hide_index=True)
+
+    st.markdown("---")
+    st.markdown("#### Distributions")
+
+    # Distribution plots: NPV and IRR
+    # We need to re-run the analysis to get the raw samples, but the current run_uncertainty_analysis only returns summary and sensitivity.
+    # We can modify the function to also return the raw samples, but to avoid breaking existing code, we'll run a separate simulation.
+    # Since run_uncertainty_analysis does not return raw samples, we'll run a lightweight version using the same logic but without returning the full output.
+    # For simplicity, we'll use a workaround: run the simulation again but with a flag to return the raw samples? Not needed here.
+    # Instead, we can run a separate Monte Carlo simulation using the economics module directly.
+    # However, for brevity, we'll use the sensitivity table and assume it's enough.
+    # For better UX, we could rewrite run_uncertainty_analysis to return raw samples, but that's out of scope for this quick addition.
+    # We'll show a placeholder message.
+
+    st.info("Distribution plots require raw sample data. Currently we display summary and sensitivity. In a future version, we'll add histogram plots.")
+    # If we had raw samples, we could plot:
+    # fig1 = create_histogram(samples['NPV'], title='NPV Distribution')
+    # fig2 = create_histogram(samples['IRR'], title='IRR Distribution')
+    # st.plotly_chart(fig1, use_container_width=True)
+    # st.plotly_chart(fig2, use_container_width=True)
+
+    st.markdown("#### Sensitivity (Tornado Plot)")
+    if not sensitivity.empty:
+        fig = sensitivity_chart(sensitivity)
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Sensitivity data is unavailable.")
 
 def main() -> None:
     inject_css()
@@ -981,9 +1064,14 @@ def main() -> None:
         ].copy()
 
         show_dashboard(filtered_df, assumptions, run_uncertainty, samples, variation)
-    else:
+    elif st.session_state.page == "Process Modeler":
         show_process_modeler(df, assumptions, run_uncertainty, samples, variation)
-
+    elif st.session_state.page == "Risk Analysis":
+        show_risk_analysis(df, assumptions)
+    else:
+        # Other pages (coming soon) – show placeholder
+        st.title(st.session_state.page)
+        st.info("This page is under development. Please check back later.")
 
 if __name__ == "__main__":
     main()
