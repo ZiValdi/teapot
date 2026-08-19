@@ -190,20 +190,14 @@ def inject_css() -> None:
             font-weight: 600;
             border-color: var(--cyan) !important;
         }
-        /* Coming soon items */
+        /* Coming soon items – dotted border */
         .coming-soon {
-            background: transparent !important;
+            color: #64748b;
+            font-size: 0.95rem;
+            padding: 4px 12px;
             border: 1px dashed var(--border) !important;
             border-radius: 8px;
-            color: #64748b;
-            font-weight: 400;
-            text-align: left;
-            font-size: 0.95rem;
-            padding: 4px 12px !important;
-            width: 100%;
-            display: flex;
-            justify-content: flex-start;
-            margin-bottom: 6px;
+            margin-bottom: 10px;
         }
         </style>
         """,
@@ -219,7 +213,7 @@ def get_data(uploaded_file) -> pd.DataFrame:
 
 
 def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumptions, bool, int, float]:
-    """Shared sidebar: logo, navigation, file upload, filters, economic assumptions."""
+    """Shared sidebar: logo, file upload, navigation, economic assumptions."""
     st.sidebar.image("assets/icon.webp", width=80)
     st.sidebar.markdown("### Project Alpha")
     st.sidebar.caption("Pyrolysis process-data MVP")
@@ -235,38 +229,9 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
             st.sidebar.error(f"Could not read uploaded CSV: {error}")
             st.stop()
 
-# Dashboard filters (only shown if page is Dashboard)
-    if st.session_state.page == "Dashboard":
-        st.sidebar.markdown("### Dashboard Controls")
-        temp_min, temp_max = float(df["temperature_c"].min()), float(df["temperature_c"].max())
-        selected_temp = st.sidebar.slider(
-            "Temperature range (°C)",
-            min_value=temp_min,
-            max_value=temp_max,
-            value=(temp_min, temp_max),
-            step=5.0,
-        )
-        rate_min = float(df["heating_rate_c_min"].min())
-        rate_max = float(df["heating_rate_c_min"].max())
-        selected_rate = st.sidebar.slider(
-            "Heating rate (°C/min)",
-            min_value=rate_min,
-            max_value=rate_max,
-            value=(rate_min, rate_max),
-            step=1.0,
-        )
-        filtered_df = df[
-            df["temperature_c"].between(*selected_temp)
-            & df["heating_rate_c_min"].between(*selected_rate)
-        ].copy()
-    else:
-        # Process Modeler uses the full dataset (no filters)
-        filtered_df = df.copy()
-
-# --- Navigation section ---
+    # Navigation
     st.sidebar.markdown("### Navigation")
 
-    # Define available pages and their status
     pages = {
         "Dashboard": "active",
         "Process Modeler": "active",
@@ -277,14 +242,11 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         "Documentation": "coming",
     }
 
-    # Initialize session state if needed
     if "page" not in st.session_state:
         st.session_state.page = "Dashboard"
 
-    # Display each page as a button (active) or plain text (coming soon)
     for page_name, status in pages.items():
         if status == "active":
-            # Active page: use a button
             button_type = "primary" if st.session_state.page == page_name else "secondary"
             if st.sidebar.button(
                 page_name,
@@ -295,12 +257,11 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
                 st.session_state.page = page_name
                 st.rerun()
         else:
-            # Coming soon: greyed out text
             st.sidebar.markdown(f'<div class="coming-soon">{page_name} (coming later)</div>', unsafe_allow_html=True)
 
     st.sidebar.markdown("---")
 
-    # Economic assumptions (popover) – shared
+    # Economic assumptions (popover)
     with st.sidebar.popover("Assumptions settings", width="stretch"):
         st.markdown("#### Economic assumptions")
         st.caption("Preliminary TEA inputs for the current process-data filter.")
@@ -416,7 +377,7 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         discount_rate=discount_rate,
         project_life_years=int(project_life_years),
     )
-    return st.session_state.page, filtered_df, assumptions, run_uncertainty, uncertainty_samples, uncertainty_variation
+    return df, assumptions, run_uncertainty, uncertainty_samples, uncertainty_variation
 
 
 def kpi_card(label: str, value: str) -> None:
@@ -545,14 +506,8 @@ def recommendation_card(item: dict[str, str]) -> None:
 
 
 def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncertainty: bool, samples: int, variation: float) -> None:
-    """Original dashboard view."""
+    """Dashboard view – expects the df to be already filtered."""
     economics = calculate_economics(df, assumptions)
-
-    st.title("Economic Decision Support")
-    st.markdown(
-        f'<div class="status-line">● Process dataset active · {len(df):,} filtered rows · preliminary TEA mode</div>',
-        unsafe_allow_html=True,
-    )
 
     st.write("")
     economic_kpis = economics["kpis"]
@@ -839,12 +794,56 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
 def main() -> None:
     inject_css()
     base_df = get_data(None)
-    page, filtered_df, assumptions, run_uncertainty, samples, variation = sidebar_controls(base_df)
+    df, assumptions, run_uncertainty, samples, variation = sidebar_controls(base_df)
 
-    if page == "Dashboard":
+    if st.session_state.page == "Dashboard":
+        # Header with gear icon popover for filters
+        col1, col2 = st.columns([6, 1])
+        with col1:
+            st.title("Economic Decision Support")
+            st.markdown(
+                f'<div class="status-line">● Process dataset active · {len(df):,} rows · preliminary TEA mode</div>',
+                unsafe_allow_html=True,
+            )
+        with col2:
+            with st.popover("⚙️ Dashboard Controls", use_container_width=True):
+                temp_min, temp_max = float(df["temperature_c"].min()), float(df["temperature_c"].max())
+                if "dash_temp_min" not in st.session_state:
+                    st.session_state.dash_temp_min = temp_min
+                    st.session_state.dash_temp_max = temp_max
+                    st.session_state.dash_rate_min = float(df["heating_rate_c_min"].min())
+                    st.session_state.dash_rate_max = float(df["heating_rate_c_min"].max())
+
+                selected_temp = st.slider(
+                    "Temperature range (°C)",
+                    min_value=temp_min,
+                    max_value=temp_max,
+                    value=(st.session_state.dash_temp_min, st.session_state.dash_temp_max),
+                    step=5.0,
+                    key="dash_temp_slider",
+                )
+                st.session_state.dash_temp_min, st.session_state.dash_temp_max = selected_temp
+
+                rate_min, rate_max = float(df["heating_rate_c_min"].min()), float(df["heating_rate_c_min"].max())
+                selected_rate = st.slider(
+                    "Heating rate (°C/min)",
+                    min_value=rate_min,
+                    max_value=rate_max,
+                    value=(st.session_state.dash_rate_min, st.session_state.dash_rate_max),
+                    step=1.0,
+                    key="dash_rate_slider",
+                )
+                st.session_state.dash_rate_min, st.session_state.dash_rate_max = selected_rate
+
+        # Apply filters
+        filtered_df = df[
+            df["temperature_c"].between(st.session_state.dash_temp_min, st.session_state.dash_temp_max)
+            & df["heating_rate_c_min"].between(st.session_state.dash_rate_min, st.session_state.dash_rate_max)
+        ].copy()
+
         show_dashboard(filtered_df, assumptions, run_uncertainty, samples, variation)
-    else:  # Process Modeler
-        show_process_modeler(base_df, assumptions, run_uncertainty, samples, variation)
+    else:
+        show_process_modeler(df, assumptions, run_uncertainty, samples, variation)
 
 
 if __name__ == "__main__":
