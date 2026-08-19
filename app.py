@@ -455,9 +455,59 @@ def sensitivity_chart(sensitivity: pd.DataFrame) -> go.Figure:
     )
     return fig
 
+
+def composition_chart(composition: dict[str, float]) -> go.Figure:
+    fig = go.Figure(
+        data=[
+            go.Pie(
+                labels=list(composition.keys()),
+                values=list(composition.values()),
+                hole=0.62,
+                marker={
+                    "colors": ["#22d3ee", "#10b981", "#f59e0b"],
+                    "line": {"color": "#0b1326", "width": 2},
+                },
+                textinfo="label+percent",
+                textfont={"color": "#dae2fd", "size": 13},
+            )
+        ]
+    )
+    fig.update_layout(
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        margin={"l": 8, "r": 8, "t": 10, "b": 8},
+        height=330,
+        showlegend=False,
+        annotations=[
+            {
+                "text": "Average<br>Feedstock",
+                "x": 0.5,
+                "y": 0.5,
+                "font": {"color": "#dae2fd", "size": 16},
+                "showarrow": False,
+            }
+        ],
+    )
+    return fig
+
+
+def recommendation_card(item: dict[str, str]) -> None:
+    tone = item.get("tone", "neutral")
+    st.markdown(
+        f"""
+        <div class="rec-card {tone}">
+            <div class="rec-title">{item["title"]}</div>
+            <div class="rec-body">{item["body"]}</div>
+            <div class="badge">Dataset-derived</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def create_distribution_plot(
     samples: pd.Series,
-    title: str,
+    title: str = "",
     xlabel: str = "",
     target_value: float = None,
     target_label: str = "Target",
@@ -556,9 +606,8 @@ def create_distribution_plot(
         height=400,
     )
 
-    # Optional CDF overlay – we can use another trace
+    # Optional CDF overlay
     if show_cdf:
-        # Compute empirical CDF
         sorted_samples = np.sort(samples)
         cdf_y = np.arange(1, len(sorted_samples)+1) / len(sorted_samples)
         fig.add_trace(go.Scatter(
@@ -582,54 +631,6 @@ def create_distribution_plot(
         )
 
     return fig
-
-def composition_chart(composition: dict[str, float]) -> go.Figure:
-    fig = go.Figure(
-        data=[
-            go.Pie(
-                labels=list(composition.keys()),
-                values=list(composition.values()),
-                hole=0.62,
-                marker={
-                    "colors": ["#22d3ee", "#10b981", "#f59e0b"],
-                    "line": {"color": "#0b1326", "width": 2},
-                },
-                textinfo="label+percent",
-                textfont={"color": "#dae2fd", "size": 13},
-            )
-        ]
-    )
-    fig.update_layout(
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        margin={"l": 8, "r": 8, "t": 10, "b": 8},
-        height=330,
-        showlegend=False,
-        annotations=[
-            {
-                "text": "Average<br>Feedstock",
-                "x": 0.5,
-                "y": 0.5,
-                "font": {"color": "#dae2fd", "size": 16},
-                "showarrow": False,
-            }
-        ],
-    )
-    return fig
-
-
-def recommendation_card(item: dict[str, str]) -> None:
-    tone = item.get("tone", "neutral")
-    st.markdown(
-        f"""
-        <div class="rec-card {tone}">
-            <div class="rec-title">{item["title"]}</div>
-            <div class="rec-body">{item["body"]}</div>
-            <div class="badge">Dataset-derived</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
 
 
 def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncertainty: bool, samples: int, variation: float) -> None:
@@ -723,11 +724,13 @@ def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncer
     if run_uncertainty:
         st.write("")
         st.markdown('<div class="section-title">Uncertainty and Sensitivity</div>', unsafe_allow_html=True)
-        uncertainty_summary, sensitivity = run_uncertainty_analysis(
+        # Now run_uncertainty_analysis always returns 3 values (summary, sensitivity, samples_df)
+        uncertainty_summary, sensitivity, _ = run_uncertainty_analysis(
             df,
             assumptions,
             sample_count=samples,
             variation_pct=variation,
+            return_samples=False,
         )
         uncertainty_col, sensitivity_col = st.columns([1.1, 1])
         with uncertainty_col:
@@ -1056,6 +1059,7 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         })
         st.dataframe(yield_df, use_container_width=True, hide_index=True)
 
+
 def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
     """Risk Analysis page – Monte Carlo uncertainty and sensitivity."""
     st.title("Risk Analysis")
@@ -1072,7 +1076,7 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         variation = st.slider("Input variation (±%)", min_value=5, max_value=50, value=20, step=5, key="risk_variation")
     with col3:
         seed = st.number_input("Random seed", min_value=0, max_value=9999, value=42, step=1, key="risk_seed")
-    
+
     target_irr = st.number_input("Target IRR (%)", min_value=0.0, max_value=50.0, value=15.0, step=0.5, key="risk_target")
 
     # Generate a key based on current parameters to detect changes
@@ -1211,7 +1215,8 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
     else:
         # Show info message if no results yet
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
-            
+
+
 def main() -> None:
     inject_css()
     base_df = get_data(None)
@@ -1268,9 +1273,9 @@ def main() -> None:
     elif st.session_state.page == "Risk Analysis":
         show_risk_analysis(df, assumptions)
     else:
-        # Other pages (coming soon) – show placeholder
         st.title(st.session_state.page)
         st.info("This page is under development. Please check back later.")
+
 
 if __name__ == "__main__":
     main()
