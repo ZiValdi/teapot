@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ from src.economics import (
 from src.model import predict_yield
 from src.recommendations import build_recommendations
 from src.uncertainty import run_uncertainty_analysis
-
+from src.comparison import save_scenario, load_scenarios, delete_scenario
 
 DATA_PATH = Path("data/experiments.csv")
 DEFAULT_ECONOMICS = EconomicAssumptions(
@@ -238,7 +239,7 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         "Process Modeler": "active",
         "Equipment Costing": "active",
         "Feedstock": "coming",
-        "Comparison": "coming",
+        "Comparison": "active",
         "Sensitivity": "coming",
         "Risk Analysis": "active",
         "Documentation": "coming",
@@ -260,6 +261,22 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
                 st.rerun()
         else:
             st.sidebar.markdown(f'<div class="coming-soon">{page_name} (coming later)</div>', unsafe_allow_html=True)
+
+    # --- Save Scenario ---
+    st.sidebar.markdown("---")
+    if st.session_state.page in ["Dashboard", "Process Modeler", "Equipment Costing", "Risk Analysis"]:
+        with st.sidebar.popover("💾 Save Scenario", use_container_width=True):
+            st.markdown("### Save current state as a scenario")
+            scenario_name = st.text_input("Scenario name (optional)", placeholder="Leave empty for auto-name")
+            if st.button("Save", use_container_width=True):
+                # Collect current scenario data
+                scenario_data = build_scenario_from_current_page()
+                if scenario_data:
+                    filename = save_scenario(scenario_data, custom_name=scenario_name if scenario_name.strip() else None)
+                    st.success(f"Saved as {filename}")
+                    st.rerun()
+                else:
+                    st.error("Could not build scenario from current page.")
 
     st.sidebar.markdown("---")
 
@@ -810,6 +827,9 @@ def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncer
         with column:
             recommendation_card(item)
 
+    st.session_state.filtered_df = df
+    st.session_state.assumptions = assumptions
+
 
 def create_flowsheet_figure(highlight: str = None) -> go.Figure:
     """
@@ -1121,6 +1141,13 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         })
         st.dataframe(yield_df, use_container_width=True, hide_index=True)
 
+    st.session_state.base_df = df
+    st.session_state.assumptions = assumptions
+    st.session_state.pm_predicted_yield = predicted_yield
+    st.session_state.pm_temp = temp
+    st.session_state.pm_rate = heating_rate
+    st.session_state.pm_n2 = n2_flow
+    st.session_state.pm_ps = particle_size
 
 def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
     """Risk Analysis page – Monte Carlo uncertainty and sensitivity."""
@@ -1278,6 +1305,9 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         # Show info message if no results yet
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
+    st.session_state.base_df = df
+    st.session_state.assumptions = assumptions
+
 def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
     """Equipment Costing page – costs update automatically with assumptions."""
     st.title("Equipment Costing")
@@ -1398,34 +1428,17 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
 
     st.markdown("---")
 
-    # Add Equipment Button
-    if st.button("➕ Add Equipment", use_container_width=False):
-        new_row = {
-            "Category": "Other",
-            "Tag": generate_tag(),
-            "Description": "New Equipment",
-            "Qty": 1,
-            "MOC": "CS",
-            "Original Base Cost": 500000.0,
-            "Base Cost": 500000.0,
-            "Multiplier": 1.0,
-            "InstFactor": 2.0,
-        }
-        st.session_state.equipment_rows.append(new_row)
-        recalc_adjusted()
-        st.rerun()
-
     st.markdown("### Equipment Master List")
     st.caption("✏️ Edit item (opens island) | 🗑️ Delete item")
 
     # Table with Edit and Delete buttons
-    header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+    header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 1.2])
     headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Actions"]
     for col, header in zip(header_cols, headers):
         col.markdown(f"**{header}**")
 
     for idx, row in df_equip.iterrows():
-        cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+        cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 1.2])
         with cols[0]:
             st.write(row["Category"])
         with cols[1]:
@@ -1519,6 +1532,23 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
                         st.rerun()
                 st.markdown("---")
 
+    # Add Equipment Button
+    if st.button("➕ Add Equipment", use_container_width=False):
+        new_row = {
+            "Category": "Other",
+            "Tag": generate_tag(),
+            "Description": "New Equipment",
+            "Qty": 1,
+            "MOC": "CS",
+            "Original Base Cost": 500000.0,
+            "Base Cost": 500000.0,
+            "Multiplier": 1.0,
+            "InstFactor": 2.0,
+        }
+        st.session_state.equipment_rows.append(new_row)
+        recalc_adjusted()
+        st.rerun()
+
     st.markdown("---")
 
     # Recompute economics
@@ -1557,6 +1587,269 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         recalc_adjusted()
         st.rerun()
 
+    st.session_state.base_df = df
+    st.session_state.assumptions = assumptions
+
+def build_scenario_from_current_page() -> dict | None:
+    """Build a scenario dict from the current session state."""
+    page = st.session_state.page
+    scenario = {
+        "page": page,
+        "timestamp": datetime.now().isoformat(),
+    }
+    if page == "Dashboard":
+        # Use filtered_df and economics
+        df = st.session_state.get("filtered_df")
+        if df is None:
+            return None
+        econ = calculate_economics(df, st.session_state.get("assumptions"))
+        scenario["process_kpis"] = calculate_kpis(df)
+        scenario["economics_kpis"] = econ["kpis"]
+        scenario["capex_breakdown"] = econ["capex_breakdown"]
+        scenario["opex_breakdown"] = econ["opex_breakdown"]
+        scenario["raw_economics"] = econ["raw"]
+        scenario["parameters"] = {
+            "temp_range": st.session_state.get("dash_temp_range"),
+            "rate_range": st.session_state.get("dash_rate_range"),
+        }
+    elif page == "Process Modeler":
+        # Use the predicted yield and economics
+        df = st.session_state.get("base_df")
+        if df is None:
+            return None
+        # Get predicted yield from session state
+        predicted_yield = st.session_state.get("pm_predicted_yield")
+        if predicted_yield is None:
+            return None
+        sample_row = df.iloc[[0]].copy()
+        sample_row["bio_liquid_yield_pct"] = predicted_yield
+        econ = calculate_economics(sample_row, st.session_state.get("assumptions"))
+        scenario["process_kpis"] = {"predicted_yield": predicted_yield}
+        scenario["economics_kpis"] = econ["kpis"]
+        scenario["capex_breakdown"] = econ["capex_breakdown"]
+        scenario["opex_breakdown"] = econ["opex_breakdown"]
+        scenario["raw_economics"] = econ["raw"]
+        scenario["parameters"] = {
+            "temperature": st.session_state.get("pm_temp"),
+            "heating_rate": st.session_state.get("pm_rate"),
+            "n2_flow": st.session_state.get("pm_n2"),
+            "particle_size": st.session_state.get("pm_ps"),
+        }
+    elif page == "Equipment Costing":
+        # Use current equipment rows and assumptions
+        rows = st.session_state.get("equipment_rows")
+        if not rows:
+            return None
+        # Recalculate economics with adjusted total
+        total_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in rows)
+        new_assumptions = replace(
+            st.session_state.get("assumptions"),
+            base_capex_meur=total_capex / 1_000_000,
+        )
+        econ = calculate_economics(st.session_state.get("base_df"), new_assumptions)
+        scenario["equipment_rows"] = rows  # store for later editing?
+        scenario["economics_kpis"] = econ["kpis"]
+        scenario["capex_breakdown"] = econ["capex_breakdown"]
+        scenario["opex_breakdown"] = econ["opex_breakdown"]
+        scenario["raw_economics"] = econ["raw"]
+        scenario["parameters"] = {
+            "capex_multipliers": st.session_state.get("cost_multipliers"),
+        }
+    elif page == "Risk Analysis":
+        # Could save the Monte Carlo summary and sensitivity
+        # For simplicity, we'll just save the current results
+        results = st.session_state.get("risk_results")
+        if not results:
+            return None
+        scenario["risk_summary"] = results.get("summary")
+        scenario["sensitivity"] = results.get("sensitivity")
+        # Also economics from the deterministic run?
+        # We can use the current assumptions
+        econ = calculate_economics(st.session_state.get("base_df"), st.session_state.get("assumptions"))
+        scenario["economics_kpis"] = econ["kpis"]
+        scenario["capex_breakdown"] = econ["capex_breakdown"]
+        scenario["opex_breakdown"] = econ["opex_breakdown"]
+        scenario["raw_economics"] = econ["raw"]
+    else:
+        return None
+
+    return scenario
+
+def show_comparison() -> None:
+    """Scenario Comparison page with Manage Scenarios popover."""
+    
+    # Header with title and manage button
+    col1, col2 = st.columns([6, 1])
+    with col1:
+        st.title("Scenario Comparison")
+        st.markdown(
+            '<div class="status-line">● Compare up to 3 scenarios side by side</div>',
+            unsafe_allow_html=True,
+        )
+    with col2:
+        # Manage Scenarios popover button
+        with st.popover("⚙️ Manage Scenarios", use_container_width=True):
+            st.markdown("### Saved Scenarios")
+            scenarios = load_scenarios()
+            if not scenarios:
+                st.caption("No scenarios saved yet.")
+            else:
+                for scenario in scenarios:
+                    fname = scenario.get("_file")
+                    name = scenario.get("name", fname)
+                    timestamp = scenario.get("timestamp", "")
+                    col_a, col_b = st.columns([4, 1])
+                    with col_a:
+                        st.write(f"{name} ({timestamp})")
+                    with col_b:
+                        if st.button("🗑️", key=f"del_{fname}"):
+                            delete_scenario(fname)
+                            st.rerun()
+
+    # --- Main comparison logic (unchanged below) ---
+    # Helper to convert None/NaN to 0 safely
+    def safe_number(x):
+        if x is None:
+            return 0.0
+        if isinstance(x, float) and np.isnan(x):
+            return 0.0
+        return float(x)
+
+    # Load all scenarios
+    scenarios = load_scenarios()
+    if not scenarios:
+        st.info("No saved scenarios yet. Use the 'Save Scenario' button in the sidebar to save the current state.")
+        return
+
+    # Create a dict for quick lookup of scenario names
+    scenario_names = {s.get("_file", f"Scenario {i}"): f"{s.get('name', s.get('_file'))} ({s.get('timestamp', '')})" for i, s in enumerate(scenarios)}
+    # Let user select up to 3
+    selected_files = st.multiselect(
+        "Select scenarios to compare (max 3)",
+        options=list(scenario_names.keys()),
+        format_func=lambda x: scenario_names[x],
+        max_selections=3,
+    )
+
+    if not selected_files:
+        st.info("Select scenarios from the list above to compare.")
+        return
+
+    # Load selected scenarios
+    selected_scenarios = [s for s in scenarios if s.get("_file") in selected_files]
+
+    # Display comparison
+    st.markdown("---")
+
+    # 1. KPI Cards per scenario
+    st.markdown("### Key Metrics")
+    cols = st.columns(len(selected_scenarios))
+    for idx, scenario in enumerate(selected_scenarios):
+        with cols[idx]:
+            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
+            econ_kpis = scenario.get("economics_kpis", {})
+            st.metric("NPV", econ_kpis.get("npv", "N/A"))
+            st.metric("IRR", econ_kpis.get("irr", "N/A"))
+            st.metric("Payback", econ_kpis.get("payback", "N/A"))
+            st.metric("CAPEX", econ_kpis.get("capex", "N/A"))
+
+    st.markdown("---")
+
+    # 2. Bar charts for comparison
+    st.markdown("### Metric Comparison")
+    metrics_to_compare = ["NPV (€M)", "IRR (%)", "Payback (yr)", "CAPEX (€M)", "OPEX (€M)", "MSP (€/t)"]
+    
+    # Extract raw economics
+    raw_values = [scenario.get("raw_economics", {}) for scenario in selected_scenarios]
+
+    # Create bar chart with Plotly
+    fig = go.Figure()
+    for i, scenario in enumerate(selected_scenarios):
+        name = scenario.get("name", scenario.get("_file"))
+        raw = raw_values[i]
+        
+        # Safely get values
+        npv = safe_number(raw.get("npv", 0)) / 1_000_000
+        irr = safe_number(raw.get("irr", 0)) * 100
+        payback = safe_number(raw.get("payback", 0))
+        capex = safe_number(raw.get("installed_capex", 0)) / 1_000_000
+        opex = safe_number(raw.get("annual_opex", 0)) / 1_000_000
+        msp = safe_number(raw.get("msp", 0))
+
+        fig.add_trace(go.Bar(
+            x=metrics_to_compare,
+            y=[npv, irr, payback, capex, opex, msp],
+            name=name,
+            text=[f"{npv:.1f}" if npv != 0 else "0.0",
+                  f"{irr:.1f}" if irr != 0 else "0.0",
+                  f"{payback:.1f}" if payback != 0 else "0.0",
+                  f"{capex:.1f}" if capex != 0 else "0.0",
+                  f"{opex:.1f}" if opex != 0 else "0.0",
+                  f"{msp:.0f}" if msp != 0 else "0"],
+            textposition="outside",
+        ))
+    fig.update_layout(
+        barmode="group",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        font=dict(color="#dae2fd"),
+        xaxis=dict(gridcolor="#334155"),
+        yaxis=dict(gridcolor="#334155"),
+        margin=dict(l=10, r=10, t=10, b=10),
+        legend=dict(font=dict(color="#dae2fd")),
+    )
+    st.plotly_chart(fig, use_container_width=True, key="comparison_bar")
+
+    st.markdown("---")
+
+    # 3. Donut charts for CAPEX and OPEX breakdowns
+    st.markdown("### CAPEX Breakdown")
+    chart_cols = st.columns(len(selected_scenarios))
+    for idx, scenario in enumerate(selected_scenarios):
+        with chart_cols[idx]:
+            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
+            breakdown = scenario.get("capex_breakdown", {})
+            if breakdown:
+                fig = breakdown_chart("CAPEX", breakdown)
+                st.plotly_chart(fig, use_container_width=True, key=f"capex_donut_{idx}")
+            else:
+                st.caption("No breakdown data")
+
+    st.markdown("### OPEX Breakdown")
+    chart_cols = st.columns(len(selected_scenarios))
+    for idx, scenario in enumerate(selected_scenarios):
+        with chart_cols[idx]:
+            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
+            breakdown = scenario.get("opex_breakdown", {})
+            if breakdown:
+                fig = breakdown_chart("OPEX", breakdown)
+                st.plotly_chart(fig, use_container_width=True, key=f"opex_donut_{idx}")
+            else:
+                st.caption("No breakdown data")
+
+    st.markdown("---")
+
+    # 4. Detailed table
+    st.markdown("### Detailed Comparison")
+    table_data = []
+    for scenario in selected_scenarios:
+        name = scenario.get("name", scenario.get("_file"))
+        econ = scenario.get("economics_kpis", {})
+        row = {
+            "Scenario": name,
+            "NPV": econ.get("npv", "N/A"),
+            "IRR": econ.get("irr", "N/A"),
+            "Payback": econ.get("payback", "N/A"),
+            "CAPEX": econ.get("capex", "N/A"),
+            "OPEX": econ.get("annual_opex", "N/A"),
+            "MSP": econ.get("msp", "N/A"),
+            "Bio-liquid": econ.get("annual_bio_liquid", "N/A"),
+            "Yield": scenario.get("process_kpis", {}).get("average_yield", scenario.get("process_kpis", {}).get("predicted_yield", "N/A")),
+        }
+        table_data.append(row)
+    df_table = pd.DataFrame(table_data)
+    st.dataframe(df_table, use_container_width=True, hide_index=True)
+    
 def main() -> None:
     inject_css()
     base_df = get_data(None)
@@ -1614,6 +1907,9 @@ def main() -> None:
         show_risk_analysis(df, assumptions)
     elif st.session_state.page == "Equipment Costing":
         show_equipment_costing(df, assumptions)
+    elif st.session_state.page == "Comparison":
+        show_comparison()
+    
     else:
         st.title(st.session_state.page)
         st.info("This page is under development. Please check back later.")
