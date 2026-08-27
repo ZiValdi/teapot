@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+from datetime import datetime
 
 import numpy as np
 import pandas as pd
@@ -22,7 +23,7 @@ from src.economics import (
 from src.model import predict_yield
 from src.recommendations import build_recommendations
 from src.uncertainty import run_uncertainty_analysis
-
+from src.comparison import save_scenario, load_scenarios, delete_scenario
 
 DATA_PATH = Path("data/experiments.csv")
 DEFAULT_ECONOMICS = EconomicAssumptions(
@@ -252,8 +253,8 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         "Process Modeler": "active",
         "Equipment Costing": "active",
         "Feedstock": "coming",
-        "Comparison": "coming",
-        "Sensitivity": "coming",
+        "Comparison": "active",
+        "Sensitivity": "active",
         "Risk Analysis": "active",
         "Documentation": "coming",
     }
@@ -275,109 +276,185 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         else:
             st.sidebar.markdown(f'<div class="coming-soon">{page_name} (coming later)</div>', unsafe_allow_html=True)
 
+    # --- Save Scenario ---
+    st.sidebar.markdown("---")
+    if st.session_state.page in ["Dashboard", "Process Modeler", "Equipment Costing", "Risk Analysis"]:
+        with st.sidebar.popover("💾 Save Scenario", use_container_width=True):
+            st.markdown("### Save current state as a scenario")
+            scenario_name = st.text_input("Scenario name (optional)", placeholder="Leave empty for auto-name")
+            if st.button("Save", use_container_width=True):
+                # Collect current scenario data
+                scenario_data = build_scenario_from_current_page()
+                if scenario_data:
+                    filename = save_scenario(scenario_data, custom_name=scenario_name if scenario_name.strip() else None)
+                    st.success(f"Saved as {filename}")
+                    st.rerun()
+                else:
+                    st.error("Could not build scenario from current page.")
+
     st.sidebar.markdown("---")
 
     # Economic assumptions (popover)
     with st.sidebar.popover("Assumptions settings", width="stretch"):
         st.markdown("#### Economic assumptions")
         st.caption("Preliminary TEA inputs for the current process-data filter.")
-        capacity_tpd = st.number_input(
-            "Plant capacity (t feed/day)",
-            min_value=1.0,
-            max_value=5000.0,
-            value=float(DEFAULT_ECONOMICS.capacity_tpd),
-            step=10.0,
-        )
-        operating_days = st.number_input(
-            "Operating days/year",
-            min_value=1,
-            max_value=365,
-            value=DEFAULT_ECONOMICS.operating_days,
-            step=5,
-        )
-        bio_liquid_price_per_t = st.number_input(
-            "Bio-liquid selling price (€/t)",
-            min_value=0.0,
-            max_value=5000.0,
-            value=float(DEFAULT_ECONOMICS.bio_liquid_price_per_t),
-            step=25.0,
-        )
-        feedstock_cost_per_t = st.number_input(
-            "Feedstock cost (€/t)",
-            min_value=-500.0,
-            max_value=1000.0,
-            value=float(DEFAULT_ECONOMICS.feedstock_cost_per_t),
-            step=5.0,
-        )
-        utility_cost_per_t_feed = st.number_input(
-            "Utilities (€/t feed)",
-            min_value=0.0,
-            max_value=1000.0,
-            value=float(DEFAULT_ECONOMICS.utility_cost_per_t_feed),
-            step=5.0,
-        )
-        labor_cost_per_year = st.number_input(
-            "Labor (€/year)",
-            min_value=0.0,
-            max_value=20_000_000.0,
-            value=float(DEFAULT_ECONOMICS.labor_cost_per_year),
-            step=50_000.0,
-        )
+        with st.expander("📊 Process & Yield", expanded=True):
+            capacity_tpd = st.number_input(
+                "Plant capacity (t feed/day)",
+                min_value=1.0,
+                max_value=5000.0,
+                value=float(DEFAULT_ECONOMICS.capacity_tpd),
+                step=10.0,
+            )
+            operating_days = st.number_input(
+                "Operating days/year",
+                min_value=1,
+                max_value=365,
+                value=DEFAULT_ECONOMICS.operating_days,
+                step=5,
+            )
+            bio_liquid_price_per_t = st.number_input(
+                "Bio-liquid selling price (€/t)",
+                min_value=0.0,
+                max_value=5000.0,
+                value=float(DEFAULT_ECONOMICS.bio_liquid_price_per_t),
+                step=25.0,
+            )
+            feedstock_cost_per_t = st.number_input(
+                "Feedstock cost (€/t)",
+                min_value=-500.0,
+                max_value=1000.0,
+                value=float(DEFAULT_ECONOMICS.feedstock_cost_per_t),
+                step=5.0,
+            )
+            utility_cost_per_t_feed = st.number_input(
+                "Utilities (€/t feed)",
+                min_value=0.0,
+                max_value=1000.0,
+                value=float(DEFAULT_ECONOMICS.utility_cost_per_t_feed),
+                step=5.0,
+            )
+            labor_cost_per_year = st.number_input(
+                "Labor (€/year)",
+                min_value=0.0,
+                max_value=20_000_000.0,
+                value=float(DEFAULT_ECONOMICS.labor_cost_per_year),
+                step=50_000.0,
+            )
 
-        st.markdown("#### Capital and finance")
-        base_capex_meur = st.number_input(
-            "Base CAPEX (€M)",
-            min_value=0.1,
-            max_value=1000.0,
-            value=float(DEFAULT_ECONOMICS.base_capex_meur),
-            step=1.0,
-        )
-        base_capacity_tpd = st.number_input(
-            "Base capacity (t/day)",
-            min_value=1.0,
-            max_value=5000.0,
-            value=float(DEFAULT_ECONOMICS.base_capacity_tpd),
-            step=10.0,
-        )
-        scaling_exponent = st.slider(
-            "Scaling exponent",
-            min_value=0.3,
-            max_value=1.0,
-            value=float(DEFAULT_ECONOMICS.scaling_exponent),
-            step=0.01,
-        )
-        maintenance_pct_capex = st.slider(
-            "Maintenance (% CAPEX/year)",
-            min_value=0.0,
-            max_value=20.0,
-            value=float(DEFAULT_ECONOMICS.maintenance_pct_capex),
-            step=0.5,
-        )
-        discount_rate = st.slider(
-            "Discount rate (%)",
-            min_value=0.0,
-            max_value=30.0,
-            value=float(DEFAULT_ECONOMICS.discount_rate),
-            step=0.5,
-        )
-        project_life_years = st.number_input(
-            "Project life (years)",
-            min_value=1,
-            max_value=40,
-            value=DEFAULT_ECONOMICS.project_life_years,
-            step=1,
-        )
+        with st.expander("💰 Capital & Finance", expanded=False):
+            st.markdown("#### Capital and finance")
+            base_capex_meur = st.number_input(
+                "Base CAPEX (€M)",
+                min_value=0.1,
+                max_value=1000.0,
+                value=float(DEFAULT_ECONOMICS.base_capex_meur),
+                step=1.0,
+            )
+            base_capacity_tpd = st.number_input(
+                "Base capacity (t/day)",
+                min_value=1.0,
+                max_value=5000.0,
+                value=float(DEFAULT_ECONOMICS.base_capacity_tpd),
+                step=10.0,
+            )
+            scaling_exponent = st.slider(
+                "Scaling exponent",
+                min_value=0.3,
+                max_value=1.0,
+                value=float(DEFAULT_ECONOMICS.scaling_exponent),
+                step=0.01,
+            )
+            maintenance_pct_capex = st.slider(
+                "Maintenance (% CAPEX/year)",
+                min_value=0.0,
+                max_value=20.0,
+                value=float(DEFAULT_ECONOMICS.maintenance_pct_capex),
+                step=0.5,
+            )
+            discount_rate = st.slider(
+                "Discount rate (%)",
+                min_value=0.0,
+                max_value=30.0,
+                value=float(DEFAULT_ECONOMICS.discount_rate),
+                step=0.5,
+            )
+            project_life_years = st.number_input(
+                "Project life (years)",
+                min_value=1,
+                max_value=40,
+                value=DEFAULT_ECONOMICS.project_life_years,
+                step=1,
+            )
 
-        st.markdown("#### Uncertainty")
-        run_uncertainty = st.toggle("Enable Monte Carlo panel", value=True)
-        uncertainty_samples = st.slider("Samples", min_value=50, max_value=1000, value=250, step=50)
-        uncertainty_variation = st.slider(
-            "Input variation (+/- %)",
-            min_value=1.0,
-            max_value=50.0,
-            value=20.0,
-            step=1.0,
-        )
+        with st.expander("🏭 Equipment Costing", expanded=False):
+            st.markdown("#### Equipment Costing Assumptions")
+            st.caption("Factors that scale equipment Base Costs in the Costing page.")
+
+            # Initialize session state for costing assumptions if not present
+            if "costing_assumptions" not in st.session_state:
+                st.session_state.costing_assumptions = {
+                    "location_factor": 1.15,
+                    "escalation_rate": 3.5,
+                    "labor_rate": 85,
+                    "tariffs": True,
+                    "cepei": False,
+                }
+
+            # Location Factor
+            location_label = st.selectbox(
+                "Location Factor",
+                options=["US Gulf Coast (1.0)", "US Midwest (1.15)", "Western Europe (1.25)", "SE Asia (0.85)"],
+                index=1,
+                key="costing_loc_factor",
+            )
+            st.session_state.costing_assumptions["location_factor"] = float(location_label.split("(")[1].rstrip(")"))
+
+            # Escalation Rate
+            st.session_state.costing_assumptions["escalation_rate"] = st.slider(
+                "Escalation Rate (%/yr)",
+                min_value=0.0,
+                max_value=10.0,
+                value=st.session_state.costing_assumptions["escalation_rate"],
+                step=0.5,
+                key="costing_esc_rate",
+            )
+
+            # Labor Rate
+            st.session_state.costing_assumptions["labor_rate"] = st.number_input(
+                "Base Labor Rate (€/hr)",
+                min_value=0,
+                max_value=200,
+                value=st.session_state.costing_assumptions["labor_rate"],
+                step=5,
+                key="costing_labor_rate",
+            )
+
+            # Tariffs toggle
+            st.session_state.costing_assumptions["tariffs"] = st.toggle(
+                "Include Tariffs",
+                value=st.session_state.costing_assumptions["tariffs"],
+                key="costing_tariffs",
+            )
+
+            # CEPCI toggle
+            st.session_state.costing_assumptions["cepei"] = st.toggle(
+                "Strict CEPCI Update",
+                value=st.session_state.costing_assumptions["cepei"],
+                key="costing_cepei",
+            )
+
+        with st.expander("🎲 Uncertainty", expanded=False):
+            st.markdown("#### Uncertainty")
+            run_uncertainty = st.toggle("Enable Monte Carlo panel", value=True)
+            uncertainty_samples = st.slider("Samples", min_value=50, max_value=1000, value=250, step=50)
+            uncertainty_variation = st.slider(
+                "Input variation (+/- %)",
+                min_value=1.0,
+                max_value=50.0,
+                value=20.0,
+                step=1.0,
+            )
 
     assumptions = EconomicAssumptions(
         capacity_tpd=capacity_tpd,
@@ -764,6 +841,9 @@ def show_dashboard(df: pd.DataFrame, assumptions: EconomicAssumptions, run_uncer
         with column:
             recommendation_card(item)
 
+    st.session_state.filtered_df = df
+    st.session_state.assumptions = assumptions
+
 
 def create_flowsheet_figure(highlight: str = None) -> go.Figure:
     """
@@ -1075,6 +1155,13 @@ def show_process_modeler(df: pd.DataFrame, assumptions: EconomicAssumptions, run
         })
         st.dataframe(yield_df, use_container_width=True, hide_index=True)
 
+    st.session_state.base_df = df
+    st.session_state.assumptions = assumptions
+    st.session_state.pm_predicted_yield = predicted_yield
+    st.session_state.pm_temp = temp
+    st.session_state.pm_rate = heating_rate
+    st.session_state.pm_n2 = n2_flow
+    st.session_state.pm_ps = particle_size
 
 def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
     """Risk Analysis page – Monte Carlo uncertainty and sensitivity."""
@@ -1273,20 +1360,20 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         ],
     }
 
-    # Build equipment list from category breakdown
     def build_equipment_list(capex_breakdown):
         rows = []
         for cat, items in category_items.items():
             cat_total = capex_breakdown.get(cat, 0)
             for item in items:
-                base_cost = cat_total * item["base_pct"]
+                orig_cost = cat_total * item["base_pct"]
                 rows.append({
                     "Category": cat,
                     "Tag": item["tag"],
                     "Description": item["description"],
                     "Qty": item["qty"],
                     "MOC": item["moc"],
-                    "Base Cost": base_cost,
+                    "Original Base Cost": orig_cost,   # store original separately
+                    "Base Cost": orig_cost,            # will be modified by factor
                     "Multiplier": 1.0,
                     "InstFactor": 2.0,
                 })
@@ -1295,11 +1382,24 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     # Initialize session state for equipment rows
     if "equipment_rows" not in st.session_state:
         st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
-    # Ensure all rows have all keys
     for row in st.session_state.equipment_rows:
-        for key in ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Multiplier", "InstFactor"]:
+        for key in ["Category", "Tag", "Description", "Qty", "MOC", "Original Base Cost", "Base Cost", "Multiplier", "InstFactor"]:
             if key not in row:
-                row[key] = 0 if "Cost" in key else "" if key != "Qty" else 1
+                if key == "Original Base Cost":
+                    row[key] = row.get("Base Cost", 0.0)
+                else:
+                    row[key] = 0 if "Cost" in key else "" if key != "Qty" else 1
+
+    # --- Auto-apply costing assumptions from session state ---
+    if "costing_assumptions" in st.session_state:
+        gf = st.session_state.costing_assumptions
+        factor = gf["location_factor"] * (1 + gf["escalation_rate"] / 100)
+        if gf["tariffs"]:
+            factor *= 1.05
+        if gf["cepei"]:
+            factor *= 1.03
+        for row in st.session_state.equipment_rows:
+            row["Base Cost"] = row["Original Base Cost"] * factor
 
     # --- History for Undo/Redo ---
     if "history" not in st.session_state:
@@ -1698,6 +1798,11 @@ def main() -> None:
         show_risk_analysis(df, assumptions)
     elif st.session_state.page == "Equipment Costing":
         show_equipment_costing(df, assumptions)
+    elif st.session_state.page == "Comparison":
+        show_comparison()
+    elif st.session_state.page == "Sensitivity":
+        show_sensitivity_analysis()
+    
     else:
         st.title(st.session_state.page)
         st.info("This page is under development. Please check back later.")
