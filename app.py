@@ -1851,7 +1851,7 @@ def show_comparison() -> None:
     st.dataframe(df_table, use_container_width=True, hide_index=True)
 
 def show_sensitivity_analysis() -> None:
-    """Sensitivity Analysis page with what‑if sliders and tornado chart."""
+    """Sensitivity Analysis page with what‑if sliders, tornado chart, and heatmap."""
     st.title("Sensitivity Analysis")
     st.markdown(
         '<div class="status-line">● Vary key parameters and see the impact on economics</div>',
@@ -2107,8 +2107,114 @@ def show_sensitivity_analysis() -> None:
         )
         st.plotly_chart(fig_tornado, use_container_width=True, key="tornado_chart")
 
+        # --- Two-way Sensitivity Heatmap ---
+        with st.expander("🔥 Two‑way Sensitivity Heatmap", expanded=False):
+            st.caption("Vary two parameters simultaneously and see NPV as a heatmap.")
+
+            col_hm1, col_hm2, col_hm3 = st.columns(3)
+            with col_hm1:
+                x_param = st.selectbox(
+                    "X‑axis parameter",
+                    options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
+                    format_func=lambda x: x.replace("_", " ").title(),
+                    key="heatmap_x"
+                )
+            with col_hm2:
+                y_param = st.selectbox(
+                    "Y‑axis parameter",
+                    options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
+                    format_func=lambda x: x.replace("_", " ").title(),
+                    key="heatmap_y",
+                    index=1
+                )
+            with col_hm3:
+                steps = st.slider("Steps per axis", min_value=5, max_value=25, value=15, step=1, key="heatmap_steps")
+                variation_range = st.slider("Variation range (±%)", min_value=10, max_value=50, value=30, step=5, key="heatmap_range")
+
+            if x_param == y_param:
+                st.warning("X and Y parameters must be different.")
+            else:
+                with st.spinner("Computing heatmap..."):
+                    # Build a parameter dict from current values
+                    param_dict = {
+                        "bio_liquid_price": vals["bio_liquid_price"],
+                        "feedstock_cost": vals["feedstock_cost"],
+                        "utility_cost_per_t_feed": vals["utility_cost"],
+                        "labor_cost": vals["labor_cost"],
+                        "base_capex_meur": vals["capex"],
+                        "discount_rate": vals["discount_rate"],
+                        "bio_liquid_yield_pct": vals["bio_liquid_yield_pct"],
+                    }
+
+                    base_x = param_dict[x_param]
+                    base_y = param_dict[y_param]
+                    range_factor = 1 + variation_range / 100
+                    x_vals = np.linspace(base_x / range_factor, base_x * range_factor, steps)
+                    y_vals = np.linspace(base_y / range_factor, base_y * range_factor, steps)
+
+                    # Initialize grid
+                    npv_grid = np.zeros((steps, steps))
+                    total_combinations = steps * steps
+                    progress = st.progress(0)
+                    progress_text = st.empty()
+
+                    for i, x_val in enumerate(x_vals):
+                        for j, y_val in enumerate(y_vals):
+                            # Override the two selected parameters
+                            param_dict[x_param] = x_val
+                            param_dict[y_param] = y_val
+
+                            temp_assumptions = EconomicAssumptions(
+                                capacity_tpd=assumptions.capacity_tpd,
+                                operating_days=assumptions.operating_days,
+                                bio_liquid_price_per_t=param_dict["bio_liquid_price"],
+                                feedstock_cost_per_t=param_dict["feedstock_cost"],
+                                utility_cost_per_t_feed=param_dict["utility_cost_per_t_feed"],
+                                labor_cost_per_year=param_dict["labor_cost"] * 1_000_000,
+                                base_capex_meur=param_dict["base_capex_meur"],
+                                base_capacity_tpd=assumptions.base_capacity_tpd,
+                                scaling_exponent=assumptions.scaling_exponent,
+                                maintenance_pct_capex=assumptions.maintenance_pct_capex,
+                                discount_rate=param_dict["discount_rate"],
+                                project_life_years=assumptions.project_life_years,
+                            )
+
+                            temp_df = df.copy()
+                            temp_df["bio_liquid_yield_pct"] = param_dict["bio_liquid_yield_pct"]
+
+                            temp_econ = calculate_economics(temp_df, temp_assumptions)
+                            npv_grid[j, i] = temp_econ["raw"]["npv"] / 1_000_000
+
+                            # Update progress
+                            idx = i * steps + j + 1
+                            progress.progress(idx / total_combinations)
+                            progress_text.text(f"Computing {idx}/{total_combinations}")
+
+                    progress.empty()
+                    progress_text.empty()
+
+                    # Create heatmap
+                    fig_hm = go.Figure(data=go.Heatmap(
+                        z=npv_grid,
+                        x=x_vals,
+                        y=y_vals,
+                        colorscale='RdYlGn',
+                        zmid=0,
+                        hovertemplate='X: %{x:.2f}<br>Y: %{y:.2f}<br>NPV: %{z:.2f}M<extra></extra>',
+                    ))
+                    fig_hm.update_layout(
+                        xaxis_title=x_param.replace("_", " ").title(),
+                        yaxis_title=y_param.replace("_", " ").title(),
+                        paper_bgcolor='rgba(0,0,0,0)',
+                        plot_bgcolor='rgba(0,0,0,0)',
+                        font=dict(color='#dae2fd'),
+                        height=500,
+                        margin=dict(l=10, r=10, t=10, b=10),
+                    )
+                    st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_chart")
+
         # Break‑even analysis
-        with st.expander("Break‑even Analysis", expanded=False):
+        with st.expander("📉 Break‑even Analysis", expanded=False):
             st.caption("Select a parameter to see the break‑even point (NPV = 0)")
 
             break_even_param = st.selectbox(
@@ -2121,38 +2227,46 @@ def show_sensitivity_analysis() -> None:
             base_val = base_values[break_even_param]
             low = base_val * 0.5
             high = base_val * 1.5
-            steps = 20
-            values = np.linspace(low, high, steps)
+            steps_be = 20
+            values_be = np.linspace(low, high, steps_be)
             npv_values = []
 
-            for val in values:
+            for val in values_be:
+                param_dict = {
+                    "bio_liquid_price": vals["bio_liquid_price"],
+                    "feedstock_cost": vals["feedstock_cost"],
+                    "utility_cost_per_t_feed": vals["utility_cost"],
+                    "labor_cost": vals["labor_cost"],
+                    "base_capex_meur": vals["capex"],
+                    "discount_rate": vals["discount_rate"],
+                    "bio_liquid_yield_pct": vals["bio_liquid_yield_pct"],
+                }
+                param_dict[break_even_param] = val
+
                 temp_assumptions = EconomicAssumptions(
                     capacity_tpd=assumptions.capacity_tpd,
                     operating_days=assumptions.operating_days,
-                    bio_liquid_price_per_t=vals["bio_liquid_price"] if break_even_param != "bio_liquid_price" else val,
-                    feedstock_cost_per_t=vals["feedstock_cost"] if break_even_param != "feedstock_cost" else val,
-                    utility_cost_per_t_feed=vals["utility_cost"] if break_even_param != "utility_cost_per_t_feed" else val,
-                    labor_cost_per_year=(vals["labor_cost"] * 1_000_000) if break_even_param != "labor_cost" else val * 1_000_000,
-                    base_capex_meur=vals["capex"] if break_even_param != "base_capex_meur" else val,
+                    bio_liquid_price_per_t=param_dict["bio_liquid_price"],
+                    feedstock_cost_per_t=param_dict["feedstock_cost"],
+                    utility_cost_per_t_feed=param_dict["utility_cost_per_t_feed"],
+                    labor_cost_per_year=param_dict["labor_cost"] * 1_000_000,
+                    base_capex_meur=param_dict["base_capex_meur"],
                     base_capacity_tpd=assumptions.base_capacity_tpd,
                     scaling_exponent=assumptions.scaling_exponent,
                     maintenance_pct_capex=assumptions.maintenance_pct_capex,
-                    discount_rate=vals["discount_rate"] if break_even_param != "discount_rate" else val,
+                    discount_rate=param_dict["discount_rate"],
                     project_life_years=assumptions.project_life_years,
                 )
 
                 temp_df = df.copy()
-                if break_even_param == "bio_liquid_yield_pct":
-                    temp_df["bio_liquid_yield_pct"] = val
-                else:
-                    temp_df["bio_liquid_yield_pct"] = vals["bio_liquid_yield_pct"]
+                temp_df["bio_liquid_yield_pct"] = param_dict["bio_liquid_yield_pct"]
 
                 temp_econ = calculate_economics(temp_df, temp_assumptions)
                 npv_values.append(temp_econ["raw"]["npv"])
 
             fig_be = go.Figure()
             fig_be.add_trace(go.Scatter(
-                x=values,
+                x=values_be,
                 y=npv_values,
                 mode='lines',
                 name='NPV',
@@ -2173,7 +2287,7 @@ def show_sensitivity_analysis() -> None:
     # Store modified state for saving scenarios
     st.session_state.sensitivity_df = df_modified
     st.session_state.sensitivity_assumptions = new_assumptions
-   
+
 def main() -> None:
     inject_css()
     base_df = get_data(None)
