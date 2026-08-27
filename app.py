@@ -201,6 +201,20 @@ def inject_css() -> None:
             border-radius: 8px;
             margin-bottom: 10px;
         }
+        
+        /* Sticky right panel for assumptions */
+        .sticky-right {
+            position: sticky;
+            top: 80px;
+            align-self: start;
+            background: var(--panel);
+            padding: 16px;
+            border-radius: 8px;
+            border: 1px solid var(--border);
+            max-height: calc(100vh - 120px);
+            overflow-y: auto;
+        }
+        
         </style>
         """,
         unsafe_allow_html=True,
@@ -1305,11 +1319,10 @@ def show_risk_analysis(df: pd.DataFrame, assumptions: EconomicAssumptions) -> No
         # Show info message if no results yet
         st.info("Click the 'Run Monte Carlo Simulation' button to start the analysis.")
 
-    st.session_state.base_df = df
-    st.session_state.assumptions = assumptions
+import copy
 
 def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -> None:
-    """Equipment Costing page – costs update automatically with assumptions."""
+    """Equipment Costing page – Equipment Master List with right panel for assumptions."""
     st.title("Equipment Costing")
     st.markdown(
         '<div class="status-line">● Manage equipment list – add, edit, or delete items</div>',
@@ -1366,7 +1379,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
                 })
         return rows
 
-    # Initialize session state
+    # Initialize session state for equipment rows
     if "equipment_rows" not in st.session_state:
         st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
     for row in st.session_state.equipment_rows:
@@ -1388,12 +1401,47 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
         for row in st.session_state.equipment_rows:
             row["Base Cost"] = row["Original Base Cost"] * factor
 
-    def recalc_adjusted():
-        for row in st.session_state.equipment_rows:
-            row["Adjusted Cost"] = row["Base Cost"] * row["Multiplier"] * row["InstFactor"]
+    # --- History for Undo/Redo ---
+    if "history" not in st.session_state:
+        st.session_state.history = [copy.deepcopy(st.session_state.equipment_rows)]
+        st.session_state.history_index = 0
+        st.session_state.history_max = 50
 
-    recalc_adjusted()
-    df_equip = pd.DataFrame(st.session_state.equipment_rows)
+    def push_history():
+        """Save current state to history (after modifications)."""
+        # Discard any future snapshots if we are not at the end
+        if st.session_state.history_index < len(st.session_state.history) - 1:
+            st.session_state.history = st.session_state.history[:st.session_state.history_index + 1]
+        # Append current state
+        st.session_state.history.append(copy.deepcopy(st.session_state.equipment_rows))
+        # Keep history bounded
+        if len(st.session_state.history) > st.session_state.history_max:
+            st.session_state.history = st.session_state.history[-st.session_state.history_max:]
+            st.session_state.history_index = len(st.session_state.history) - 1
+        else:
+            st.session_state.history_index += 1
+
+    def undo():
+        if st.session_state.history_index > 0:
+            st.session_state.history_index -= 1
+            st.session_state.equipment_rows = copy.deepcopy(st.session_state.history[st.session_state.history_index])
+            st.rerun()
+
+    def redo():
+        if st.session_state.history_index < len(st.session_state.history) - 1:
+            st.session_state.history_index += 1
+            st.session_state.equipment_rows = copy.deepcopy(st.session_state.history[st.session_state.history_index])
+            st.rerun()
+
+    # Global assumptions session state
+    if "global_assumptions" not in st.session_state:
+        st.session_state.global_assumptions = {
+            "location_factor": 1.15,
+            "escalation_rate": 3.5,
+            "labor_rate": 85,
+            "tariffs": True,
+            "cepei": False,
+        }
 
     # Track which row is being edited
     if "edit_row_tag" not in st.session_state:
@@ -1401,6 +1449,7 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
     if "delete_row_tag" not in st.session_state:
         st.session_state.delete_row_tag = None
 
+    # Helper functions
     def generate_tag():
         existing_tags = [r["Tag"] for r in st.session_state.equipment_rows]
         base = "CUSTOM"
@@ -1409,884 +1458,288 @@ def show_equipment_costing(df: pd.DataFrame, assumptions: EconomicAssumptions) -
             counter += 1
         return f"{base}-{counter:03d}"
 
-    # Summary cards
-    total_tic = df_equip["Adjusted Cost"].sum()
-    pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
-    indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
-    contingency = indirect * 0.4
+    def recalc_adjusted():
+        for row in st.session_state.equipment_rows:
+            row["Adjusted Cost"] = row["Base Cost"] * row["Multiplier"] * row["InstFactor"]
 
-    st.markdown("### Summary")
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Total Installed Cost (TIC)", f"€{total_tic/1e6:.1f}M")
-    with col2:
-        st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1e6:.1f}M")
-    with col3:
-        st.metric("Indirect Costs", f"€{indirect/1e6:.1f}M")
-    with col4:
-        st.metric("Contingency", f"€{contingency/1e6:.1f}M")
-
-    st.markdown("---")
-
-    st.markdown("### Equipment Master List")
-    st.caption("✏️ Edit item (opens island) | 🗑️ Delete item")
-
-    # Table with Edit and Delete buttons
-    header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 1.2])
-    headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Actions"]
-    for col, header in zip(header_cols, headers):
-        col.markdown(f"**{header}**")
-
-    for idx, row in df_equip.iterrows():
-        cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 1.2])
-        with cols[0]:
-            st.write(row["Category"])
-        with cols[1]:
-            st.write(row["Tag"])
-        with cols[2]:
-            st.write(row["Description"])
-        with cols[3]:
-            st.write(row["Qty"])
-        with cols[4]:
-            st.write(row["MOC"])
-        with cols[5]:
-            st.write(f"€{row['Base Cost']/1e6:.2f}M")
-        with cols[6]:
-            st.write(f"{row['Multiplier']:.2f}x")
-        with cols[7]:
-            st.write(f"{row['InstFactor']:.1f}")
-        with cols[8]:
-            st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
-        with cols[9]:
-            edit_col, del_col = st.columns(2)
-            with edit_col:
-                if st.button("✏️", key=f"edit_{row['Tag']}", help="Edit item"):
-                    st.session_state.edit_row_tag = row["Tag"]
-                    st.rerun()
-            with del_col:
-                if st.button("🗑️", key=f"del_{row['Tag']}", help="Delete item"):
-                    st.session_state.delete_row_tag = row["Tag"]
-                    st.rerun()
-
-        # Edit Island
-        if st.session_state.edit_row_tag == row["Tag"]:
-            with st.container():
-                st.markdown("---")
-                st.markdown(f"**✏️ Editing {row['Tag']}**")
-                col1, col2 = st.columns([2, 1])
-                with col1:
-                    new_category = st.text_input("Category", value=row["Category"], key=f"cat_{row['Tag']}")
-                    new_tag = st.text_input("Tag", value=row["Tag"], key=f"tag_{row['Tag']}")
-                    new_desc = st.text_input("Description", value=row["Description"], key=f"desc_{row['Tag']}")
-                    col_qty, col_moc = st.columns(2)
-                    with col_qty:
-                        new_qty = st.number_input("Qty", min_value=1, value=int(row["Qty"]), step=1, key=f"qty_{row['Tag']}")
-                    with col_moc:
-                        new_moc = st.text_input("MOC", value=row["MOC"], key=f"moc_{row['Tag']}")
-                    new_base = st.number_input("Base Cost (€)", min_value=0.0, value=float(row["Base Cost"]), step=100000.0, format="%.0f", key=f"base_{row['Tag']}")
-                    col_mult, col_inst = st.columns(2)
-                    with col_mult:
-                        new_mult = st.number_input("Multiplier (0.5–2.0)", min_value=0.5, max_value=2.0, value=row["Multiplier"], step=0.05, key=f"mult_{row['Tag']}")
-                    with col_inst:
-                        new_inst = st.number_input("Inst. Factor (0.5–4.0)", min_value=0.5, max_value=4.0, value=row["InstFactor"], step=0.1, key=f"inst_{row['Tag']}")
-                with col2:
-                    st.markdown("**Actions**")
-                    if st.button("✅ Confirm", key=f"confirm_{row['Tag']}", use_container_width=True):
-                        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
-                        if row_idx is not None:
-                            st.session_state.equipment_rows[row_idx]["Category"] = new_category
-                            st.session_state.equipment_rows[row_idx]["Tag"] = new_tag
-                            st.session_state.equipment_rows[row_idx]["Description"] = new_desc
-                            st.session_state.equipment_rows[row_idx]["Qty"] = new_qty
-                            st.session_state.equipment_rows[row_idx]["MOC"] = new_moc
-                            st.session_state.equipment_rows[row_idx]["Base Cost"] = new_base
-                            st.session_state.equipment_rows[row_idx]["Original Base Cost"] = new_base
-                            st.session_state.equipment_rows[row_idx]["Multiplier"] = new_mult
-                            st.session_state.equipment_rows[row_idx]["InstFactor"] = new_inst
-                            recalc_adjusted()
-                        st.session_state.edit_row_tag = None
-                        st.rerun()
-                    if st.button("❌ Cancel", key=f"cancel_{row['Tag']}", use_container_width=True):
-                        st.session_state.edit_row_tag = None
-                        st.rerun()
-                st.markdown("---")
-
-        # Delete Island
-        if st.session_state.delete_row_tag == row["Tag"]:
-            with st.container():
-                st.markdown("---")
-                st.warning(f"🗑️ Delete {row['Tag']}?")
-                st.caption(f"Description: {row['Description']}")
-                col_confirm, col_cancel = st.columns(2)
-                with col_confirm:
-                    if st.button("✅ Yes, delete", key=f"del_confirm_{row['Tag']}", use_container_width=True):
-                        row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
-                        if row_idx is not None:
-                            st.session_state.equipment_rows.pop(row_idx)
-                            recalc_adjusted()
-                        st.session_state.delete_row_tag = None
-                        st.rerun()
-                with col_cancel:
-                    if st.button("❌ No, cancel", key=f"del_cancel_{row['Tag']}", use_container_width=True):
-                        st.session_state.delete_row_tag = None
-                        st.rerun()
-                st.markdown("---")
-
-    # Add Equipment Button
-    if st.button("➕ Add Equipment", use_container_width=False):
-        new_row = {
-            "Category": "Other",
-            "Tag": generate_tag(),
-            "Description": "New Equipment",
-            "Qty": 1,
-            "MOC": "CS",
-            "Original Base Cost": 500000.0,
-            "Base Cost": 500000.0,
-            "Multiplier": 1.0,
-            "InstFactor": 2.0,
-        }
-        st.session_state.equipment_rows.append(new_row)
+    def apply_global_assumptions():
+        gf = st.session_state.global_assumptions
+        factor = gf["location_factor"] * (1 + gf["escalation_rate"] / 100)
+        if gf["tariffs"]:
+            factor *= 1.05
+        if gf["cepei"]:
+            factor *= 1.03
+        for row in st.session_state.equipment_rows:
+            row["Base Cost"] *= factor
         recalc_adjusted()
-        st.rerun()
+        push_history()  # save after applying assumptions
 
-    st.markdown("---")
+    recalc_adjusted()
+    df_equip = pd.DataFrame(st.session_state.equipment_rows)
 
-    # Recompute economics
-    total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
-    new_assumptions = replace(
-        assumptions,
-        base_capex_meur=total_new_capex / 1_000_000,
-    )
-    new_econ = calculate_economics(df, new_assumptions)
-    new_kpis = new_econ["kpis"]
+    # --- Layout: main content (left) and right panel (sticky) ---
+    col_main, col_right = st.columns([3, 1])
 
-    st.markdown("### Updated Economics")
-    econ_cols = st.columns(4)
-    with econ_cols[0]:
-        st.metric("Total CAPEX", new_kpis["capex"])
-    with econ_cols[1]:
-        st.metric("NPV", new_kpis["npv"])
-    with econ_cols[2]:
-        st.metric("IRR", new_kpis["irr"])
-    with econ_cols[3]:
-        st.metric("Payback", new_kpis["payback"])
+    with col_main:
+        # --- Summary Cards ---
+        total_tic = df_equip["Adjusted Cost"].sum()
+        pec = df_equip[~df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+        indirect = df_equip[df_equip["Category"].str.contains("Installation|Contingency")]["Adjusted Cost"].sum()
+        contingency = indirect * 0.4
 
-    # Reset button – rebuild from breakdown and reset costing assumptions
-    if st.button("Reset All to Defaults", use_container_width=True):
-        st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
-        st.session_state.edit_row_tag = None
-        st.session_state.delete_row_tag = None
-        if "costing_assumptions" in st.session_state:
-            st.session_state.costing_assumptions = {
+        st.markdown("### Summary")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            st.metric("Total Installed Cost (TIC)", f"€{total_tic/1e6:.1f}M")
+        with col2:
+            st.metric("Purchased Eqpt Cost (PEC)", f"€{pec/1e6:.1f}M")
+        with col3:
+            st.metric("Indirect Costs", f"€{indirect/1e6:.1f}M")
+        with col4:
+            st.metric("Contingency", f"€{contingency/1e6:.1f}M")
+
+        st.markdown("---")
+
+        # --- Add Equipment Button ---
+        if st.button("➕ Add Equipment", use_container_width=False):
+            new_row = {
+                "Category": "Other",
+                "Tag": generate_tag(),
+                "Description": "New Equipment",
+                "Qty": 1,
+                "MOC": "CS",
+                "Base Cost": 500000.0,
+                "Multiplier": 1.0,
+                "InstFactor": 2.0,
+            }
+            st.session_state.equipment_rows.append(new_row)
+            recalc_adjusted()
+            push_history()
+            st.rerun()
+
+        st.markdown("### Equipment Master List")
+        st.caption("✏️ Edit item (opens island) | 🗑️ Delete item")
+
+        # --- Table with Edit and Delete buttons ---
+        # Header
+        header_cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+        headers = ["Category", "Tag", "Description", "Qty", "MOC", "Base Cost", "Mult.", "Inst. Factor", "Adjusted", "Actions"]
+        for col, header in zip(header_cols, headers):
+            col.markdown(f"**{header}**")
+
+        # Rows
+        for idx, row in df_equip.iterrows():
+            # Row data
+            cols = st.columns([1.2, 1.2, 2.5, 0.6, 1.0, 1.0, 0.8, 0.8, 1.0, 0.8])
+            with cols[0]:
+                st.write(row["Category"])
+            with cols[1]:
+                st.write(row["Tag"])
+            with cols[2]:
+                st.write(row["Description"])
+            with cols[3]:
+                st.write(row["Qty"])
+            with cols[4]:
+                st.write(row["MOC"])
+            with cols[5]:
+                st.write(f"€{row['Base Cost']/1e6:.2f}M")
+            with cols[6]:
+                st.write(f"{row['Multiplier']:.2f}x")
+            with cols[7]:
+                st.write(f"{row['InstFactor']:.1f}")
+            with cols[8]:
+                st.write(f"€{row['Adjusted Cost']/1e6:.2f}M")
+            with cols[9]:
+                edit_col, del_col = st.columns(2)
+                with edit_col:
+                    if st.button("✏️", key=f"edit_{row['Tag']}", help="Edit item"):
+                        st.session_state.edit_row_tag = row["Tag"]
+                        st.rerun()
+                with del_col:
+                    if st.button("🗑️", key=f"del_{row['Tag']}", help="Delete item"):
+                        st.session_state.delete_row_tag = row["Tag"]
+                        st.rerun()
+
+            # --- Edit Island ---
+            if st.session_state.edit_row_tag == row["Tag"]:
+                with st.container():
+                    st.markdown("---")
+                    st.markdown(f"**✏️ Editing {row['Tag']}**")
+                    col1, col2 = st.columns([2, 1])
+                    with col1:
+                        new_category = st.text_input("Category", value=row["Category"], key=f"cat_{row['Tag']}")
+                        new_tag = st.text_input("Tag", value=row["Tag"], key=f"tag_{row['Tag']}")
+                        new_desc = st.text_input("Description", value=row["Description"], key=f"desc_{row['Tag']}")
+                        col_qty, col_moc = st.columns(2)
+                        with col_qty:
+                            new_qty = st.number_input("Qty", min_value=1, value=int(row["Qty"]), step=1, key=f"qty_{row['Tag']}")
+                        with col_moc:
+                            new_moc = st.text_input("MOC", value=row["MOC"], key=f"moc_{row['Tag']}")
+                        new_base = st.number_input(
+                            "Base Cost (€)",
+                            min_value=0.0,
+                            value=float(row["Base Cost"]),
+                            step=100000.0,
+                            format="%.0f",
+                            key=f"base_{row['Tag']}",
+                        )
+                        col_mult, col_inst = st.columns(2)
+                        with col_mult:
+                            new_mult = st.number_input(
+                                "Multiplier (0.5–2.0)",
+                                min_value=0.5,
+                                max_value=2.0,
+                                value=row["Multiplier"],
+                                step=0.05,
+                                key=f"mult_{row['Tag']}",
+                            )
+                        with col_inst:
+                            new_inst = st.number_input(
+                                "Inst. Factor (0.5–4.0)",
+                                min_value=0.5,
+                                max_value=4.0,
+                                value=row["InstFactor"],
+                                step=0.1,
+                                key=f"inst_{row['Tag']}",
+                            )
+                    with col2:
+                        st.markdown("**Actions**")
+                        if st.button("✅ Confirm", key=f"confirm_{row['Tag']}", use_container_width=True):
+                            row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
+                            if row_idx is not None:
+                                st.session_state.equipment_rows[row_idx]["Category"] = new_category
+                                st.session_state.equipment_rows[row_idx]["Tag"] = new_tag
+                                st.session_state.equipment_rows[row_idx]["Description"] = new_desc
+                                st.session_state.equipment_rows[row_idx]["Qty"] = new_qty
+                                st.session_state.equipment_rows[row_idx]["MOC"] = new_moc
+                                st.session_state.equipment_rows[row_idx]["Base Cost"] = new_base
+                                st.session_state.equipment_rows[row_idx]["Multiplier"] = new_mult
+                                st.session_state.equipment_rows[row_idx]["InstFactor"] = new_inst
+                                recalc_adjusted()
+                                push_history()
+                            st.session_state.edit_row_tag = None
+                            st.rerun()
+                        if st.button("❌ Cancel", key=f"cancel_{row['Tag']}", use_container_width=True):
+                            st.session_state.edit_row_tag = None
+                            st.rerun()
+                    st.markdown("---")
+
+            # --- Delete Island ---
+            if st.session_state.delete_row_tag == row["Tag"]:
+                with st.container():
+                    st.markdown("---")
+                    st.warning(f"🗑️ Delete {row['Tag']}?")
+                    st.caption(f"Description: {row['Description']}")
+                    col_confirm, col_cancel = st.columns(2)
+                    with col_confirm:
+                        if st.button("✅ Yes, delete", key=f"del_confirm_{row['Tag']}", use_container_width=True):
+                            row_idx = next((i for i, r in enumerate(st.session_state.equipment_rows) if r["Tag"] == row["Tag"]), None)
+                            if row_idx is not None:
+                                st.session_state.equipment_rows.pop(row_idx)
+                                recalc_adjusted()
+                                push_history()
+                            st.session_state.delete_row_tag = None
+                            st.rerun()
+                    with col_cancel:
+                        if st.button("❌ No, cancel", key=f"del_cancel_{row['Tag']}", use_container_width=True):
+                            st.session_state.delete_row_tag = None
+                            st.rerun()
+                    st.markdown("---")
+
+        # --- Recompute economics ---
+        total_new_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in st.session_state.equipment_rows)
+        new_assumptions = replace(
+            assumptions,
+            base_capex_meur=total_new_capex / 1_000_000,
+        )
+        new_econ = calculate_economics(df, new_assumptions)
+        new_kpis = new_econ["kpis"]
+
+        st.markdown("### Updated Economics")
+        econ_cols = st.columns(4)
+        with econ_cols[0]:
+            st.metric("Total CAPEX", new_kpis["capex"])
+        with econ_cols[1]:
+            st.metric("NPV", new_kpis["npv"])
+        with econ_cols[2]:
+            st.metric("IRR", new_kpis["irr"])
+        with econ_cols[3]:
+            st.metric("Payback", new_kpis["payback"])
+
+        # --- Reset button (in main area) ---
+        if st.button("Reset All to Defaults", use_container_width=True):
+            st.session_state.equipment_rows = build_equipment_list(base_capex_breakdown)
+            for row in st.session_state.equipment_rows:
+                row["Multiplier"] = 1.0
+                row["InstFactor"] = 2.0
+            st.session_state.edit_row_tag = None
+            st.session_state.delete_row_tag = None
+            st.session_state.global_assumptions = {
                 "location_factor": 1.15,
                 "escalation_rate": 3.5,
                 "labor_rate": 85,
                 "tariffs": True,
                 "cepei": False,
             }
-        recalc_adjusted()
-        st.rerun()
-
-    st.session_state.base_df = df
-    st.session_state.assumptions = assumptions
-
-def build_scenario_from_current_page() -> dict | None:
-    """Build a scenario dict from the current session state."""
-    page = st.session_state.page
-    scenario = {
-        "page": page,
-        "timestamp": datetime.now().isoformat(),
-    }
-    if page == "Dashboard":
-        # Use filtered_df and economics
-        df = st.session_state.get("filtered_df")
-        if df is None:
-            return None
-        econ = calculate_economics(df, st.session_state.get("assumptions"))
-        scenario["process_kpis"] = calculate_kpis(df)
-        scenario["economics_kpis"] = econ["kpis"]
-        scenario["capex_breakdown"] = econ["capex_breakdown"]
-        scenario["opex_breakdown"] = econ["opex_breakdown"]
-        scenario["raw_economics"] = econ["raw"]
-        scenario["parameters"] = {
-            "temp_range": st.session_state.get("dash_temp_range"),
-            "rate_range": st.session_state.get("dash_rate_range"),
-        }
-    elif page == "Process Modeler":
-        # Use the predicted yield and economics
-        df = st.session_state.get("base_df")
-        if df is None:
-            return None
-        # Get predicted yield from session state
-        predicted_yield = st.session_state.get("pm_predicted_yield")
-        if predicted_yield is None:
-            return None
-        sample_row = df.iloc[[0]].copy()
-        sample_row["bio_liquid_yield_pct"] = predicted_yield
-        econ = calculate_economics(sample_row, st.session_state.get("assumptions"))
-        scenario["process_kpis"] = {"predicted_yield": predicted_yield}
-        scenario["economics_kpis"] = econ["kpis"]
-        scenario["capex_breakdown"] = econ["capex_breakdown"]
-        scenario["opex_breakdown"] = econ["opex_breakdown"]
-        scenario["raw_economics"] = econ["raw"]
-        scenario["parameters"] = {
-            "temperature": st.session_state.get("pm_temp"),
-            "heating_rate": st.session_state.get("pm_rate"),
-            "n2_flow": st.session_state.get("pm_n2"),
-            "particle_size": st.session_state.get("pm_ps"),
-        }
-    elif page == "Equipment Costing":
-        # Use current equipment rows and assumptions
-        rows = st.session_state.get("equipment_rows")
-        if not rows:
-            return None
-        # Recalculate economics with adjusted total
-        total_capex = sum(r["Base Cost"] * r["Multiplier"] * r["InstFactor"] for r in rows)
-        new_assumptions = replace(
-            st.session_state.get("assumptions"),
-            base_capex_meur=total_capex / 1_000_000,
-        )
-        econ = calculate_economics(st.session_state.get("base_df"), new_assumptions)
-        scenario["equipment_rows"] = rows  # store for later editing?
-        scenario["economics_kpis"] = econ["kpis"]
-        scenario["capex_breakdown"] = econ["capex_breakdown"]
-        scenario["opex_breakdown"] = econ["opex_breakdown"]
-        scenario["raw_economics"] = econ["raw"]
-        scenario["parameters"] = {
-            "capex_multipliers": st.session_state.get("cost_multipliers"),
-        }
-    elif page == "Risk Analysis":
-        # Could save the Monte Carlo summary and sensitivity
-        # For simplicity, we'll just save the current results
-        results = st.session_state.get("risk_results")
-        if not results:
-            return None
-        scenario["risk_summary"] = results.get("summary")
-        scenario["sensitivity"] = results.get("sensitivity")
-        # Also economics from the deterministic run?
-        # We can use the current assumptions
-        econ = calculate_economics(st.session_state.get("base_df"), st.session_state.get("assumptions"))
-        scenario["economics_kpis"] = econ["kpis"]
-        scenario["capex_breakdown"] = econ["capex_breakdown"]
-        scenario["opex_breakdown"] = econ["opex_breakdown"]
-        scenario["raw_economics"] = econ["raw"]
-    else:
-        return None
-
-    return scenario
-
-def show_comparison() -> None:
-    """Scenario Comparison page with Manage Scenarios popover."""
-    
-    # Header with title and manage button
-    col1, col2 = st.columns([6, 1])
-    with col1:
-        st.title("Scenario Comparison")
-        st.markdown(
-            '<div class="status-line">● Compare up to 3 scenarios side by side</div>',
-            unsafe_allow_html=True,
-        )
-    with col2:
-        # Manage Scenarios popover button
-        with st.popover("⚙️ Manage Scenarios", use_container_width=True):
-            st.markdown("### Saved Scenarios")
-            scenarios = load_scenarios()
-            if not scenarios:
-                st.caption("No scenarios saved yet.")
-            else:
-                for scenario in scenarios:
-                    fname = scenario.get("_file")
-                    name = scenario.get("name", fname)
-                    timestamp = scenario.get("timestamp", "")
-                    col_a, col_b = st.columns([4, 1])
-                    with col_a:
-                        st.write(f"{name} ({timestamp})")
-                    with col_b:
-                        if st.button("🗑️", key=f"del_{fname}"):
-                            delete_scenario(fname)
-                            st.rerun()
-
-    # --- Main comparison logic (unchanged below) ---
-    # Helper to convert None/NaN to 0 safely
-    def safe_number(x):
-        if x is None:
-            return 0.0
-        if isinstance(x, float) and np.isnan(x):
-            return 0.0
-        return float(x)
-
-    # Load all scenarios
-    scenarios = load_scenarios()
-    if not scenarios:
-        st.info("No saved scenarios yet. Use the 'Save Scenario' button in the sidebar to save the current state.")
-        return
-
-    # Create a dict for quick lookup of scenario names
-    scenario_names = {s.get("_file", f"Scenario {i}"): f"{s.get('name', s.get('_file'))} ({s.get('timestamp', '')})" for i, s in enumerate(scenarios)}
-    # Let user select up to 3
-    selected_files = st.multiselect(
-        "Select scenarios to compare (max 3)",
-        options=list(scenario_names.keys()),
-        format_func=lambda x: scenario_names[x],
-        max_selections=3,
-    )
-
-    if not selected_files:
-        st.info("Select scenarios from the list above to compare.")
-        return
-
-    # Load selected scenarios
-    selected_scenarios = [s for s in scenarios if s.get("_file") in selected_files]
-
-    # Display comparison
-    st.markdown("---")
-
-    # 1. KPI Cards per scenario
-    st.markdown("### Key Metrics")
-    cols = st.columns(len(selected_scenarios))
-    for idx, scenario in enumerate(selected_scenarios):
-        with cols[idx]:
-            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
-            econ_kpis = scenario.get("economics_kpis", {})
-            st.metric("NPV", econ_kpis.get("npv", "N/A"))
-            st.metric("IRR", econ_kpis.get("irr", "N/A"))
-            st.metric("Payback", econ_kpis.get("payback", "N/A"))
-            st.metric("CAPEX", econ_kpis.get("capex", "N/A"))
-
-    st.markdown("---")
-
-    # 2. Bar charts for comparison
-    st.markdown("### Metric Comparison")
-    metrics_to_compare = ["NPV (€M)", "IRR (%)", "Payback (yr)", "CAPEX (€M)", "OPEX (€M)", "MSP (€/t)"]
-    
-    # Extract raw economics
-    raw_values = [scenario.get("raw_economics", {}) for scenario in selected_scenarios]
-
-    # Create bar chart with Plotly
-    fig = go.Figure()
-    for i, scenario in enumerate(selected_scenarios):
-        name = scenario.get("name", scenario.get("_file"))
-        raw = raw_values[i]
-        
-        # Safely get values
-        npv = safe_number(raw.get("npv", 0)) / 1_000_000
-        irr = safe_number(raw.get("irr", 0)) * 100
-        payback = safe_number(raw.get("payback", 0))
-        capex = safe_number(raw.get("installed_capex", 0)) / 1_000_000
-        opex = safe_number(raw.get("annual_opex", 0)) / 1_000_000
-        msp = safe_number(raw.get("msp", 0))
-
-        fig.add_trace(go.Bar(
-            x=metrics_to_compare,
-            y=[npv, irr, payback, capex, opex, msp],
-            name=name,
-            text=[f"{npv:.1f}" if npv != 0 else "0.0",
-                  f"{irr:.1f}" if irr != 0 else "0.0",
-                  f"{payback:.1f}" if payback != 0 else "0.0",
-                  f"{capex:.1f}" if capex != 0 else "0.0",
-                  f"{opex:.1f}" if opex != 0 else "0.0",
-                  f"{msp:.0f}" if msp != 0 else "0"],
-            textposition="outside",
-        ))
-    fig.update_layout(
-        barmode="group",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(color="#dae2fd"),
-        xaxis=dict(gridcolor="#334155"),
-        yaxis=dict(gridcolor="#334155"),
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(font=dict(color="#dae2fd")),
-    )
-    st.plotly_chart(fig, use_container_width=True, key="comparison_bar")
-
-    st.markdown("---")
-
-    # 3. Donut charts for CAPEX and OPEX breakdowns
-    st.markdown("### CAPEX Breakdown")
-    chart_cols = st.columns(len(selected_scenarios))
-    for idx, scenario in enumerate(selected_scenarios):
-        with chart_cols[idx]:
-            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
-            breakdown = scenario.get("capex_breakdown", {})
-            if breakdown:
-                fig = breakdown_chart("CAPEX", breakdown)
-                st.plotly_chart(fig, use_container_width=True, key=f"capex_donut_{idx}")
-            else:
-                st.caption("No breakdown data")
-
-    st.markdown("### OPEX Breakdown")
-    chart_cols = st.columns(len(selected_scenarios))
-    for idx, scenario in enumerate(selected_scenarios):
-        with chart_cols[idx]:
-            st.markdown(f"**{scenario.get('name', scenario.get('_file'))}**")
-            breakdown = scenario.get("opex_breakdown", {})
-            if breakdown:
-                fig = breakdown_chart("OPEX", breakdown)
-                st.plotly_chart(fig, use_container_width=True, key=f"opex_donut_{idx}")
-            else:
-                st.caption("No breakdown data")
-
-    st.markdown("---")
-
-    # 4. Detailed table
-    st.markdown("### Detailed Comparison")
-    table_data = []
-    for scenario in selected_scenarios:
-        name = scenario.get("name", scenario.get("_file"))
-        econ = scenario.get("economics_kpis", {})
-        row = {
-            "Scenario": name,
-            "NPV": econ.get("npv", "N/A"),
-            "IRR": econ.get("irr", "N/A"),
-            "Payback": econ.get("payback", "N/A"),
-            "CAPEX": econ.get("capex", "N/A"),
-            "OPEX": econ.get("annual_opex", "N/A"),
-            "MSP": econ.get("msp", "N/A"),
-            "Bio-liquid": econ.get("annual_bio_liquid", "N/A"),
-            "Yield": scenario.get("process_kpis", {}).get("average_yield", scenario.get("process_kpis", {}).get("predicted_yield", "N/A")),
-        }
-        table_data.append(row)
-    df_table = pd.DataFrame(table_data)
-    st.dataframe(df_table, use_container_width=True, hide_index=True)
-
-def show_sensitivity_analysis() -> None:
-    """Sensitivity Analysis page with what‑if sliders, tornado chart, and heatmap."""
-    st.title("Sensitivity Analysis")
-    st.markdown(
-        '<div class="status-line">● Vary key parameters and see the impact on economics</div>',
-        unsafe_allow_html=True,
-    )
-
-    # Load data from session state (filtered_df if available, else base_df)
-    df = st.session_state.get("filtered_df")
-    if df is None:
-        df = st.session_state.get("base_df")
-    if df is None:
-        st.warning("No dataset available. Please go to the Dashboard or upload a CSV first.")
-        return
-
-    assumptions = st.session_state.get("assumptions", DEFAULT_ECONOMICS)
-
-    # Default parameter values (from current assumptions)
-    defaults = {
-        "bio_liquid_yield_pct": df["bio_liquid_yield_pct"].mean() if not df.empty else 45.0,
-        "bio_liquid_price": assumptions.bio_liquid_price_per_t,
-        "feedstock_cost": assumptions.feedstock_cost_per_t,
-        "capex": assumptions.base_capex_meur,
-        "discount_rate": assumptions.discount_rate,
-        "utility_cost": assumptions.utility_cost_per_t_feed,
-        "labor_cost": assumptions.labor_cost_per_year / 1_000_000,
-    }
-
-    # Initialize session state keys if not present
-    for key, default_val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = default_val
-
-    # Store defaults for reset
-    if "sensitivity_defaults" not in st.session_state:
-        st.session_state.sensitivity_defaults = defaults.copy()
-
-    # --- Reset handling (before any widgets) ---
-    if st.session_state.get("reset_sensitivity", False):
-        for key, val in st.session_state.sensitivity_defaults.items():
-            st.session_state[key] = val
-        st.session_state.reset_sensitivity = False
-        st.rerun()
-
-    # Layout: controls (left) and results (right)
-    col_left, col_right = st.columns([1, 2])
-
-    with col_left:
-        st.markdown("### Parameters")
-        variation = st.slider(
-            "Variation for tornado (±%)",
-            min_value=5,
-            max_value=50,
-            value=20,
-            step=5,
-            key="sensitivity_variation"
-        )
-
-        # Sliders for each parameter using `key`
-        st.slider(
-            "Bio‑liquid Yield (%)",
-            min_value=0.0,
-            max_value=100.0,
-            step=0.5,
-            key="bio_liquid_yield_pct"
-        )
-        st.number_input(
-            "Bio‑liquid Price (€/t)",
-            min_value=0.0,
-            max_value=5000.0,
-            step=25.0,
-            key="bio_liquid_price"
-        )
-        st.number_input(
-            "Feedstock Cost (€/t)",
-            min_value=-500.0,
-            max_value=1000.0,
-            step=5.0,
-            key="feedstock_cost"
-        )
-        st.number_input(
-            "Base CAPEX (€M)",
-            min_value=0.1,
-            max_value=1000.0,
-            step=1.0,
-            key="capex"
-        )
-        st.slider(
-            "Discount Rate (%)",
-            min_value=0.0,
-            max_value=30.0,
-            step=0.5,
-            key="discount_rate"
-        )
-        st.number_input(
-            "Utilities (€/t feed)",
-            min_value=0.0,
-            max_value=1000.0,
-            step=5.0,
-            key="utility_cost"
-        )
-        st.number_input(
-            "Labor (€M/year)",
-            min_value=0.0,
-            max_value=50.0,
-            step=0.5,
-            key="labor_cost"
-        )
-
-        # Reset button – sets flag, not direct assignment
-        if st.button("↺ Reset to Defaults", use_container_width=True):
-            st.session_state.reset_sensitivity = True
+            recalc_adjusted()
+            push_history()
             st.rerun()
 
-    # Read values from session state
-    vals = {key: st.session_state[key] for key in defaults.keys()}
-
-    # Build new assumptions from slider values
-    new_assumptions = EconomicAssumptions(
-        capacity_tpd=assumptions.capacity_tpd,
-        operating_days=assumptions.operating_days,
-        bio_liquid_price_per_t=vals["bio_liquid_price"],
-        feedstock_cost_per_t=vals["feedstock_cost"],
-        utility_cost_per_t_feed=vals["utility_cost"],
-        labor_cost_per_year=vals["labor_cost"] * 1_000_000,
-        base_capex_meur=vals["capex"],
-        base_capacity_tpd=assumptions.base_capacity_tpd,
-        scaling_exponent=assumptions.scaling_exponent,
-        maintenance_pct_capex=assumptions.maintenance_pct_capex,
-        discount_rate=vals["discount_rate"],
-        project_life_years=assumptions.project_life_years,
-    )
-
-    # Modify the dataset to reflect the yield slider
-    df_modified = df.copy()
-    if not df_modified.empty:
-        df_modified["bio_liquid_yield_pct"] = vals["bio_liquid_yield_pct"]
-
-    # Run economics
-    econ = calculate_economics(df_modified, new_assumptions)
-    kpis = econ["kpis"]
-    raw = econ["raw"]
-
-    # Right column: results
+    # --- Right Panel (sticky) ---
     with col_right:
-        st.markdown("### Economic KPIs")
-        col_npv, col_irr, col_pay, col_capex = st.columns(4)
-        with col_npv:
-            st.metric("NPV", kpis["npv"])
-        with col_irr:
-            st.metric("IRR", kpis["irr"])
-        with col_pay:
-            st.metric("Payback", kpis["payback"])
-        with col_capex:
-            st.metric("CAPEX", kpis["capex"])
+        st.markdown('<div class="sticky-right">', unsafe_allow_html=True)
+        st.markdown("### ⚙️ Global Assumptions")
+        st.caption("Apply to all equipment costs.")
 
-        # Tornado chart
-        st.markdown("### Tornado Chart (Impact on NPV)")
-        st.caption(f"Showing change in NPV when each parameter is varied by ±{variation}%")
+        # Undo / Redo buttons
+        col_undo, col_redo = st.columns(2)
+        with col_undo:
+            if st.button("↩️ Undo", use_container_width=True, disabled=(st.session_state.history_index == 0)):
+                undo()
+        with col_redo:
+            if st.button("↪️ Redo", use_container_width=True, disabled=(st.session_state.history_index >= len(st.session_state.history) - 1)):
+                redo()
+        st.markdown("---")
 
-        # Compute one‑way sensitivity
-        base_npv = raw["npv"]
-        base_values = {
-            "bio_liquid_yield_pct": vals["bio_liquid_yield_pct"],
-            "bio_liquid_price": vals["bio_liquid_price"],
-            "feedstock_cost": vals["feedstock_cost"],
-            "base_capex_meur": vals["capex"],
-            "discount_rate": vals["discount_rate"],
-            "utility_cost_per_t_feed": vals["utility_cost"],
-            "labor_cost": vals["labor_cost"],
-        }
-
-        impacts = []
-        variation_factor = 1 + variation / 100
-
-        for key, base_val in base_values.items():
-            low_val = base_val / variation_factor
-            high_val = base_val * variation_factor
-
-            for val, label in [(low_val, "Low"), (high_val, "High")]:
-                temp_assumptions = EconomicAssumptions(
-                    capacity_tpd=assumptions.capacity_tpd,
-                    operating_days=assumptions.operating_days,
-                    bio_liquid_price_per_t=vals["bio_liquid_price"] if key != "bio_liquid_price" else val,
-                    feedstock_cost_per_t=vals["feedstock_cost"] if key != "feedstock_cost" else val,
-                    utility_cost_per_t_feed=vals["utility_cost"] if key != "utility_cost_per_t_feed" else val,
-                    labor_cost_per_year=(vals["labor_cost"] * 1_000_000) if key != "labor_cost" else val * 1_000_000,
-                    base_capex_meur=vals["capex"] if key != "base_capex_meur" else val,
-                    base_capacity_tpd=assumptions.base_capacity_tpd,
-                    scaling_exponent=assumptions.scaling_exponent,
-                    maintenance_pct_capex=assumptions.maintenance_pct_capex,
-                    discount_rate=vals["discount_rate"] if key != "discount_rate" else val,
-                    project_life_years=assumptions.project_life_years,
-                )
-
-                temp_df = df.copy()
-                if key == "bio_liquid_yield_pct":
-                    temp_df["bio_liquid_yield_pct"] = val
-                else:
-                    temp_df["bio_liquid_yield_pct"] = vals["bio_liquid_yield_pct"]
-
-                temp_econ = calculate_economics(temp_df, temp_assumptions)
-                temp_npv = temp_econ["raw"]["npv"]
-                delta = temp_npv - base_npv
-
-                param_name = key.replace("_", " ").title()
-                if key == "bio_liquid_yield_pct":
-                    param_name = "Yield"
-                elif key == "base_capex_meur":
-                    param_name = "CAPEX"
-                elif key == "utility_cost_per_t_feed":
-                    param_name = "Utilities"
-                impacts.append((f"{param_name} ({label})", delta))
-
-        df_impacts = pd.DataFrame(impacts, columns=["Parameter", "NPV Change (€)"])
-        df_impacts["abs_delta"] = df_impacts["NPV Change (€)"].abs()
-        df_impacts = df_impacts.sort_values("abs_delta", ascending=False)
-
-        fig_tornado = go.Figure()
-        pos_data = df_impacts[df_impacts["NPV Change (€)"] >= 0]
-        neg_data = df_impacts[df_impacts["NPV Change (€)"] < 0]
-
-        if not pos_data.empty:
-            fig_tornado.add_trace(go.Bar(
-                y=pos_data["Parameter"],
-                x=pos_data["NPV Change (€)"] / 1_000_000,
-                orientation='h',
-                marker_color='#10b981',
-                name='Positive impact',
-                text=pos_data["NPV Change (€)"].apply(lambda x: f"€{x/1_000_000:.2f}M"),
-                textposition='outside',
-            ))
-        if not neg_data.empty:
-            fig_tornado.add_trace(go.Bar(
-                y=neg_data["Parameter"],
-                x=neg_data["NPV Change (€)"] / 1_000_000,
-                orientation='h',
-                marker_color='#ff5a65',
-                name='Negative impact',
-                text=neg_data["NPV Change (€)"].apply(lambda x: f"€{x/1_000_000:.2f}M"),
-                textposition='outside',
-            ))
-
-        fig_tornado.update_layout(
-            barmode='relative',
-            paper_bgcolor='rgba(0,0,0,0)',
-            plot_bgcolor='rgba(0,0,0,0)',
-            font=dict(color='#dae2fd'),
-            xaxis=dict(title="NPV Change (€M)", gridcolor='#334155'),
-            yaxis=dict(gridcolor='#334155'),
-            margin=dict(l=10, r=10, t=10, b=10),
-            height=400,
-            legend=dict(font=dict(color='#dae2fd')),
+        # Assumption controls
+        location_label = st.selectbox(
+            "Location Factor",
+            options=["US Gulf Coast (1.0)", "US Midwest (1.15)", "Western Europe (1.25)", "SE Asia (0.85)"],
+            index=1,
+            key="loc_factor_sel",
         )
-        st.plotly_chart(fig_tornado, use_container_width=True, key="tornado_chart")
+        location_factor = float(location_label.split("(")[1].rstrip(")"))
+        escalation_rate = st.slider(
+            "Escalation Rate (%/yr)",
+            min_value=0.0,
+            max_value=10.0,
+            value=st.session_state.global_assumptions["escalation_rate"],
+            step=0.5,
+            key="esc_rate",
+        )
+        labor_rate = st.number_input(
+            "Base Labor Rate (€/hr)",
+            min_value=0,
+            max_value=200,
+            value=st.session_state.global_assumptions["labor_rate"],
+            step=5,
+            key="labor_rate_input",
+        )
+        tariffs = st.toggle("Include Tariffs", value=st.session_state.global_assumptions["tariffs"], key="tariff_toggle")
+        cepei = st.toggle("Strict CEPCI Update", value=st.session_state.global_assumptions["cepei"], key="cepei_toggle")
 
-        # --- Two-way Sensitivity Heatmap ---
-        with st.expander("🔥 Two‑way Sensitivity Heatmap", expanded=False):
-            st.caption("Vary two parameters simultaneously and see NPV as a heatmap.")
+        # Apply button
+        if st.button("Apply Assumptions", use_container_width=True):
+            st.session_state.global_assumptions["location_factor"] = location_factor
+            st.session_state.global_assumptions["escalation_rate"] = escalation_rate
+            st.session_state.global_assumptions["labor_rate"] = labor_rate
+            st.session_state.global_assumptions["tariffs"] = tariffs
+            st.session_state.global_assumptions["cepei"] = cepei
+            apply_global_assumptions()
+            st.rerun()
 
-            col_hm1, col_hm2, col_hm3 = st.columns(3)
-            with col_hm1:
-                x_param = st.selectbox(
-                    "X‑axis parameter",
-                    options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
-                    format_func=lambda x: x.replace("_", " ").title(),
-                    key="heatmap_x"
-                )
-            with col_hm2:
-                y_param = st.selectbox(
-                    "Y‑axis parameter",
-                    options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
-                    format_func=lambda x: x.replace("_", " ").title(),
-                    key="heatmap_y",
-                    index=1
-                )
-            with col_hm3:
-                steps = st.slider("Steps per axis", min_value=5, max_value=25, value=15, step=1, key="heatmap_steps")
-                variation_range = st.slider("Variation range (±%)", min_value=10, max_value=50, value=30, step=5, key="heatmap_range")
-
-            if x_param == y_param:
-                st.warning("X and Y parameters must be different.")
-            else:
-                with st.spinner("Computing heatmap..."):
-                    # Build a parameter dict from current values
-                    param_dict = {
-                        "bio_liquid_price": vals["bio_liquid_price"],
-                        "feedstock_cost": vals["feedstock_cost"],
-                        "utility_cost_per_t_feed": vals["utility_cost"],
-                        "labor_cost": vals["labor_cost"],
-                        "base_capex_meur": vals["capex"],
-                        "discount_rate": vals["discount_rate"],
-                        "bio_liquid_yield_pct": vals["bio_liquid_yield_pct"],
-                    }
-
-                    base_x = param_dict[x_param]
-                    base_y = param_dict[y_param]
-                    range_factor = 1 + variation_range / 100
-                    x_vals = np.linspace(base_x / range_factor, base_x * range_factor, steps)
-                    y_vals = np.linspace(base_y / range_factor, base_y * range_factor, steps)
-
-                    # Initialize grid
-                    npv_grid = np.zeros((steps, steps))
-                    total_combinations = steps * steps
-                    progress = st.progress(0)
-                    progress_text = st.empty()
-
-                    for i, x_val in enumerate(x_vals):
-                        for j, y_val in enumerate(y_vals):
-                            # Override the two selected parameters
-                            param_dict[x_param] = x_val
-                            param_dict[y_param] = y_val
-
-                            temp_assumptions = EconomicAssumptions(
-                                capacity_tpd=assumptions.capacity_tpd,
-                                operating_days=assumptions.operating_days,
-                                bio_liquid_price_per_t=param_dict["bio_liquid_price"],
-                                feedstock_cost_per_t=param_dict["feedstock_cost"],
-                                utility_cost_per_t_feed=param_dict["utility_cost_per_t_feed"],
-                                labor_cost_per_year=param_dict["labor_cost"] * 1_000_000,
-                                base_capex_meur=param_dict["base_capex_meur"],
-                                base_capacity_tpd=assumptions.base_capacity_tpd,
-                                scaling_exponent=assumptions.scaling_exponent,
-                                maintenance_pct_capex=assumptions.maintenance_pct_capex,
-                                discount_rate=param_dict["discount_rate"],
-                                project_life_years=assumptions.project_life_years,
-                            )
-
-                            temp_df = df.copy()
-                            temp_df["bio_liquid_yield_pct"] = param_dict["bio_liquid_yield_pct"]
-
-                            temp_econ = calculate_economics(temp_df, temp_assumptions)
-                            npv_grid[j, i] = temp_econ["raw"]["npv"] / 1_000_000
-
-                            # Update progress
-                            idx = i * steps + j + 1
-                            progress.progress(idx / total_combinations)
-                            progress_text.text(f"Computing {idx}/{total_combinations}")
-
-                    progress.empty()
-                    progress_text.empty()
-
-                    # Create heatmap
-                    fig_hm = go.Figure(data=go.Heatmap(
-                        z=npv_grid,
-                        x=x_vals,
-                        y=y_vals,
-                        colorscale='RdYlGn',
-                        zmid=0,
-                        hovertemplate='X: %{x:.2f}<br>Y: %{y:.2f}<br>NPV: %{z:.2f}M<extra></extra>',
-                    ))
-                    fig_hm.update_layout(
-                        xaxis_title=x_param.replace("_", " ").title(),
-                        yaxis_title=y_param.replace("_", " ").title(),
-                        paper_bgcolor='rgba(0,0,0,0)',
-                        plot_bgcolor='rgba(0,0,0,0)',
-                        font=dict(color='#dae2fd'),
-                        height=500,
-                        margin=dict(l=10, r=10, t=10, b=10),
-                    )
-                    st.plotly_chart(fig_hm, use_container_width=True, key="heatmap_chart")
-
-        # Break‑even analysis
-        with st.expander("📉 Break‑even Analysis", expanded=False):
-            st.caption("Select a parameter to see the break‑even point (NPV = 0)")
-
-            break_even_param = st.selectbox(
-                "Parameter",
-                options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
-                format_func=lambda x: x.replace("_", " ").title(),
-                key="break_even_param"
-            )
-
-            base_val = base_values[break_even_param]
-            low = base_val * 0.5
-            high = base_val * 1.5
-            steps_be = 20
-            values_be = np.linspace(low, high, steps_be)
-            npv_values = []
-
-            for val in values_be:
-                param_dict = {
-                    "bio_liquid_price": vals["bio_liquid_price"],
-                    "feedstock_cost": vals["feedstock_cost"],
-                    "utility_cost_per_t_feed": vals["utility_cost"],
-                    "labor_cost": vals["labor_cost"],
-                    "base_capex_meur": vals["capex"],
-                    "discount_rate": vals["discount_rate"],
-                    "bio_liquid_yield_pct": vals["bio_liquid_yield_pct"],
-                }
-                param_dict[break_even_param] = val
-
-                temp_assumptions = EconomicAssumptions(
-                    capacity_tpd=assumptions.capacity_tpd,
-                    operating_days=assumptions.operating_days,
-                    bio_liquid_price_per_t=param_dict["bio_liquid_price"],
-                    feedstock_cost_per_t=param_dict["feedstock_cost"],
-                    utility_cost_per_t_feed=param_dict["utility_cost_per_t_feed"],
-                    labor_cost_per_year=param_dict["labor_cost"] * 1_000_000,
-                    base_capex_meur=param_dict["base_capex_meur"],
-                    base_capacity_tpd=assumptions.base_capacity_tpd,
-                    scaling_exponent=assumptions.scaling_exponent,
-                    maintenance_pct_capex=assumptions.maintenance_pct_capex,
-                    discount_rate=param_dict["discount_rate"],
-                    project_life_years=assumptions.project_life_years,
-                )
-
-                temp_df = df.copy()
-                temp_df["bio_liquid_yield_pct"] = param_dict["bio_liquid_yield_pct"]
-
-                temp_econ = calculate_economics(temp_df, temp_assumptions)
-                npv_values.append(temp_econ["raw"]["npv"])
-
-            fig_be = go.Figure()
-            fig_be.add_trace(go.Scatter(
-                x=values_be,
-                y=npv_values,
-                mode='lines',
-                name='NPV',
-                line=dict(color='#22d3ee', width=2),
-            ))
-            fig_be.add_hline(y=0, line_dash="dash", line_color="#ffb4ab")
-            fig_be.update_layout(
-                paper_bgcolor='rgba(0,0,0,0)',
-                plot_bgcolor='rgba(0,0,0,0)',
-                font=dict(color='#dae2fd'),
-                xaxis=dict(title=break_even_param.replace("_", " ").title(), gridcolor='#334155'),
-                yaxis=dict(title="NPV (€M)", gridcolor='#334155'),
-                margin=dict(l=10, r=10, t=10, b=10),
-                height=300,
-            )
-            st.plotly_chart(fig_be, use_container_width=True, key="break_even_chart")
-
-    # Store modified state for saving scenarios
-    st.session_state.sensitivity_df = df_modified
-    st.session_state.sensitivity_assumptions = new_assumptions
+        st.caption("Click 'Apply' to scale all equipment Base Costs.")
+        st.markdown('</div>', unsafe_allow_html=True)
 
 def main() -> None:
     inject_css()
