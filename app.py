@@ -240,7 +240,7 @@ def sidebar_controls(df: pd.DataFrame) -> tuple[pd.DataFrame, EconomicAssumption
         "Equipment Costing": "active",
         "Feedstock": "coming",
         "Comparison": "active",
-        "Sensitivity": "coming",
+        "Sensitivity": "active",
         "Risk Analysis": "active",
         "Documentation": "coming",
     }
@@ -1849,6 +1849,317 @@ def show_comparison() -> None:
         table_data.append(row)
     df_table = pd.DataFrame(table_data)
     st.dataframe(df_table, use_container_width=True, hide_index=True)
+
+def show_sensitivity_analysis() -> None:
+    """Sensitivity Analysis page with what‑if sliders and tornado chart."""
+    st.title("Sensitivity Analysis")
+    st.markdown(
+        '<div class="status-line">● Vary key parameters and see the impact on economics</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Load data from session state (filtered_df if available, else base_df)
+    df = st.session_state.get("filtered_df")
+    if df is None:
+        df = st.session_state.get("base_df")
+    if df is None:
+        st.warning("No dataset available. Please go to the Dashboard or upload a CSV first.")
+        return
+
+    assumptions = st.session_state.get("assumptions", DEFAULT_ECONOMICS)
+
+    # Default parameter values (from current assumptions)
+    defaults = {
+        "bio_liquid_yield_pct": df["bio_liquid_yield_pct"].mean() if not df.empty else 45.0,
+        "bio_liquid_price": assumptions.bio_liquid_price_per_t,
+        "feedstock_cost": assumptions.feedstock_cost_per_t,
+        "capex": assumptions.base_capex_meur,      # in millions
+        "discount_rate": assumptions.discount_rate,
+        "utility_cost": assumptions.utility_cost_per_t_feed,
+        "labor_cost": assumptions.labor_cost_per_year / 1_000_000,  # in millions
+    }
+
+    # Store default values in session state for reset
+    if "sensitivity_defaults" not in st.session_state:
+        st.session_state.sensitivity_defaults = defaults.copy()
+
+    # Layout: controls (left) and results (right)
+    col_left, col_right = st.columns([1, 2])
+
+    with col_left:
+        st.markdown("### Parameters")
+        variation = st.slider("Variation for tornado (±%)", min_value=5, max_value=50, value=20, step=5)
+
+        # Sliders for each parameter (relative to default)
+        yield_factor = st.slider(
+            "Bio‑liquid Yield (%)",
+            min_value=0.0,
+            max_value=100.0,
+            value=float(defaults["bio_liquid_yield_pct"]),
+            step=0.5,
+        )
+        price = st.number_input(
+            "Bio‑liquid Price (€/t)",
+            min_value=0.0,
+            max_value=5000.0,
+            value=float(defaults["bio_liquid_price"]),
+            step=25.0,
+        )
+        feedstock = st.number_input(
+            "Feedstock Cost (€/t)",
+            min_value=-500.0,
+            max_value=1000.0,
+            value=float(defaults["feedstock_cost"]),
+            step=5.0,
+        )
+        capex = st.number_input(
+            "Base CAPEX (€M)",
+            min_value=0.1,
+            max_value=1000.0,
+            value=float(defaults["capex"]),
+            step=1.0,
+        )
+        discount = st.slider(
+            "Discount Rate (%)",
+            min_value=0.0,
+            max_value=30.0,
+            value=float(defaults["discount_rate"]),
+            step=0.5,
+        )
+        utility = st.number_input(
+            "Utilities (€/t feed)",
+            min_value=0.0,
+            max_value=1000.0,
+            value=float(defaults["utility_cost"]),
+            step=5.0,
+        )
+        labor = st.number_input(
+            "Labor (€M/year)",
+            min_value=0.0,
+            max_value=50.0,
+            value=float(defaults["labor_cost"]),
+            step=0.5,
+        )
+
+        # Reset button
+        if st.button("↺ Reset to Defaults", use_container_width=True):
+            st.session_state.sensitivity_defaults = defaults.copy()
+            st.rerun()
+
+    # Build new assumptions from slider values
+    new_assumptions = EconomicAssumptions(
+        capacity_tpd=assumptions.capacity_tpd,
+        operating_days=assumptions.operating_days,
+        bio_liquid_price_per_t=price,
+        feedstock_cost_per_t=feedstock,
+        utility_cost_per_t_feed=utility,
+        labor_cost_per_year=labor * 1_000_000,
+        base_capex_meur=capex,
+        base_capacity_tpd=assumptions.base_capacity_tpd,
+        scaling_exponent=assumptions.scaling_exponent,
+        maintenance_pct_capex=assumptions.maintenance_pct_capex,
+        discount_rate=discount,
+        project_life_years=assumptions.project_life_years,
+    )
+
+    # Modify the dataset to reflect the yield slider
+    df_modified = df.copy()
+    if not df_modified.empty:
+        df_modified["bio_liquid_yield_pct"] = yield_factor
+
+    # Run economics
+    econ = calculate_economics(df_modified, new_assumptions)
+    kpis = econ["kpis"]
+    raw = econ["raw"]
+
+    # Right column: results
+    with col_right:
+        st.markdown("### Economic KPIs")
+        col_npv, col_irr, col_pay, col_capex = st.columns(4)
+        with col_npv:
+            st.metric("NPV", kpis["npv"])
+        with col_irr:
+            st.metric("IRR", kpis["irr"])
+        with col_pay:
+            st.metric("Payback", kpis["payback"])
+        with col_capex:
+            st.metric("CAPEX", kpis["capex"])
+
+        # Tornado chart
+        st.markdown("### Tornado Chart (Impact on NPV)")
+        st.caption(f"Showing change in NPV when each parameter is varied by ±{variation}%")
+
+        # Compute one‑way sensitivity
+        # Store original values
+        base_npv = raw["npv"]
+        base_values = {
+            "bio_liquid_yield_pct": defaults["bio_liquid_yield_pct"],
+            "bio_liquid_price": defaults["bio_liquid_price"],
+            "feedstock_cost": defaults["feedstock_cost"],
+            "base_capex_meur": defaults["capex"],
+            "discount_rate": defaults["discount_rate"],
+            "utility_cost_per_t_feed": defaults["utility_cost"],
+            "labor_cost": defaults["labor_cost"],
+        }
+
+        impacts = []
+        variation_factor = 1 + variation / 100
+
+        for key, base_val in base_values.items():
+            # Low case
+            low_val = base_val / variation_factor
+            # High case
+            high_val = base_val * variation_factor
+
+            # Build assumptions for low and high
+            for val, label in [(low_val, "Low"), (high_val, "High")]:
+                # Create modified assumptions
+                temp_assumptions = EconomicAssumptions(
+                    capacity_tpd=assumptions.capacity_tpd,
+                    operating_days=assumptions.operating_days,
+                    bio_liquid_price_per_t=price if key != "bio_liquid_price" else val,
+                    feedstock_cost_per_t=feedstock if key != "feedstock_cost" else val,
+                    utility_cost_per_t_feed=utility if key != "utility_cost_per_t_feed" else val,
+                    labor_cost_per_year=(labor * 1_000_000) if key != "labor_cost" else val * 1_000_000,
+                    base_capex_meur=capex if key != "base_capex_meur" else val,
+                    base_capacity_tpd=assumptions.base_capacity_tpd,
+                    scaling_exponent=assumptions.scaling_exponent,
+                    maintenance_pct_capex=assumptions.maintenance_pct_capex,
+                    discount_rate=discount if key != "discount_rate" else val,
+                    project_life_years=assumptions.project_life_years,
+                )
+
+                # For yield, we need to modify the dataset
+                temp_df = df.copy()
+                if key == "bio_liquid_yield_pct":
+                    temp_df["bio_liquid_yield_pct"] = val
+                else:
+                    temp_df["bio_liquid_yield_pct"] = yield_factor
+
+                temp_econ = calculate_economics(temp_df, temp_assumptions)
+                temp_npv = temp_econ["raw"]["npv"]
+                delta = temp_npv - base_npv
+
+                impacts.append((f"{key} ({label})", delta))
+
+        # Convert to DataFrame for sorting
+        import pandas as pd
+        df_impacts = pd.DataFrame(impacts, columns=["Parameter", "NPV Change (€)"])
+        # Sort by absolute impact
+        df_impacts["abs_delta"] = df_impacts["NPV Change (€)"].abs()
+        df_impacts = df_impacts.sort_values("abs_delta", ascending=False)
+
+        # Create tornado chart
+        fig_tornado = go.Figure()
+
+        # Add bars for positive and negative changes
+        pos_data = df_impacts[df_impacts["NPV Change (€)"] >= 0]
+        neg_data = df_impacts[df_impacts["NPV Change (€)"] < 0]
+
+        if not pos_data.empty:
+            fig_tornado.add_trace(go.Bar(
+                y=pos_data["Parameter"],
+                x=pos_data["NPV Change (€)"] / 1_000_000,  # in millions
+                orientation='h',
+                marker_color='#10b981',
+                name='Positive impact',
+                text=pos_data["NPV Change (€)"].apply(lambda x: f"€{x/1_000_000:.2f}M"),
+                textposition='outside',
+            ))
+        if not neg_data.empty:
+            fig_tornado.add_trace(go.Bar(
+                y=neg_data["Parameter"],
+                x=neg_data["NPV Change (€)"] / 1_000_000,
+                orientation='h',
+                marker_color='#ff5a65',
+                name='Negative impact',
+                text=neg_data["NPV Change (€)"].apply(lambda x: f"€{x/1_000_000:.2f}M"),
+                textposition='outside',
+            ))
+
+        fig_tornado.update_layout(
+            barmode='relative',
+            paper_bgcolor='rgba(0,0,0,0)',
+            plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#dae2fd'),
+            xaxis=dict(title="NPV Change (€M)", gridcolor='#334155'),
+            yaxis=dict(gridcolor='#334155'),
+            margin=dict(l=10, r=10, t=10, b=10),
+            height=400,
+            legend=dict(font=dict(color='#dae2fd')),
+        )
+
+        st.plotly_chart(fig_tornado, use_container_width=True, key="tornado_chart")
+
+        # Optional: Break‑even analysis
+        with st.expander("Break‑even Analysis", expanded=False):
+            st.caption("Select a parameter to see the break‑even point (NPV = 0)")
+
+            break_even_param = st.selectbox(
+                "Parameter",
+                options=["bio_liquid_yield_pct", "bio_liquid_price", "feedstock_cost", "base_capex_meur", "discount_rate"],
+                format_func=lambda x: x.replace("_", " ").title(),
+            )
+
+            # Generate a range of values
+            base_val = base_values[break_even_param]
+            low = base_val * 0.5
+            high = base_val * 1.5
+            steps = 20
+            values = np.linspace(low, high, steps)
+            npv_values = []
+
+            for val in values:
+                # Build assumptions
+                temp_assumptions = EconomicAssumptions(
+                    capacity_tpd=assumptions.capacity_tpd,
+                    operating_days=assumptions.operating_days,
+                    bio_liquid_price_per_t=price if break_even_param != "bio_liquid_price" else val,
+                    feedstock_cost_per_t=feedstock if break_even_param != "feedstock_cost" else val,
+                    utility_cost_per_t_feed=utility if break_even_param != "utility_cost_per_t_feed" else val,
+                    labor_cost_per_year=(labor * 1_000_000) if break_even_param != "labor_cost" else val * 1_000_000,
+                    base_capex_meur=capex if break_even_param != "base_capex_meur" else val,
+                    base_capacity_tpd=assumptions.base_capacity_tpd,
+                    scaling_exponent=assumptions.scaling_exponent,
+                    maintenance_pct_capex=assumptions.maintenance_pct_capex,
+                    discount_rate=discount if break_even_param != "discount_rate" else val,
+                    project_life_years=assumptions.project_life_years,
+                )
+
+                temp_df = df.copy()
+                if break_even_param == "bio_liquid_yield_pct":
+                    temp_df["bio_liquid_yield_pct"] = val
+                else:
+                    temp_df["bio_liquid_yield_pct"] = yield_factor
+
+                temp_econ = calculate_economics(temp_df, temp_assumptions)
+                npv_values.append(temp_econ["raw"]["npv"])
+
+            # Plot line chart
+            fig_be = go.Figure()
+            fig_be.add_trace(go.Scatter(
+                x=values,
+                y=npv_values,
+                mode='lines',
+                name='NPV',
+                line=dict(color='#22d3ee', width=2),
+            ))
+            # Add zero line
+            fig_be.add_hline(y=0, line_dash="dash", line_color="#ffb4ab")
+            fig_be.update_layout(
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(0,0,0,0)',
+                font=dict(color='#dae2fd'),
+                xaxis=dict(title=break_even_param.replace("_", " ").title(), gridcolor='#334155'),
+                yaxis=dict(title="NPV (€M)", gridcolor='#334155'),
+                margin=dict(l=10, r=10, t=10, b=10),
+                height=300,
+            )
+            st.plotly_chart(fig_be, use_container_width=True, key="break_even_chart")
+
+    # Store modified state for saving scenarios (optional)
+    st.session_state.sensitivity_df = df_modified
+    st.session_state.sensitivity_assumptions = new_assumptions
     
 def main() -> None:
     inject_css()
@@ -1909,6 +2220,8 @@ def main() -> None:
         show_equipment_costing(df, assumptions)
     elif st.session_state.page == "Comparison":
         show_comparison()
+    elif st.session_state.page == "Sensitivity":
+        show_sensitivity_analysis()
     
     else:
         st.title(st.session_state.page)
